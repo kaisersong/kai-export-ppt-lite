@@ -1,0 +1,10 @@
+# Build/IDE
+__pycache__/
+*.pyc
+*.py.bak
+*.bak
+
+# Demo/debug
+demo/
+dump_compare.py
+scripts/_debug*.py
