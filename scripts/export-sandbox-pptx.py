@@ -1343,20 +1343,14 @@ def flat_extract(
         if all_inline and total_text and has_visible_bg_or_border(style):
             text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
             if text_el:
-                # For inline-child containers, set shape width from text content + padding
-                # (build_text_element may default to full slide width for long text)
+                # For inline-child containers, use text element's width (respects content_width_px)
+                _expand_padding(style)
                 pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
                 pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
                 pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
                 pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
-                # Compute content-based width
-                font_size_px = parse_px(style.get('fontSize', '16px'))
-                if font_size_px <= 0:
-                    font_size_px = 16.0
-                cjk = sum(1 for c in total_text if ord(c) > 127)
-                latin = len(total_text) - cjk
-                text_w_in = (cjk * font_size_px + latin * font_size_px * 0.55) / PX_PER_IN
-                shape_w = text_w_in + pad_l + pad_r
+                # Use text element's width (already constrained by content_width_px)
+                shape_w = text_el['bounds']['width'] + pad_l + pad_r
                 shape_h = text_el['bounds']['height'] + pad_t + pad_b
                 shape = {
                     'type': 'shape', 'tag': element.name,
@@ -1366,6 +1360,8 @@ def flat_extract(
                 }
                 if style.get('border', ''):
                     shape['styles']['border'] = style['border']
+                if style.get('borderLeft', ''):
+                    shape['styles']['borderLeft'] = style['borderLeft']
                 if style.get('borderRadius', ''):
                     shape['styles']['borderRadius'] = style['borderRadius']
                 # Pair shape with text
@@ -1564,7 +1560,13 @@ def build_grid_children(
                     item_widths.append(text_el['bounds']['width'])
                 continue
 
-            sub_elements = flat_extract(child, css_rules, child_style, slide_width_px)
+            # For grid cell containers, compute internal width (cell width - padding)
+            # so nested elements (like <li> in <ul>) use the available width
+            pad_l = parse_px(child_style.get('paddingLeft', '0px'))
+            pad_r = parse_px(child_style.get('paddingRight', '0px'))
+            cell_internal_width_px = (item_width_in - (pad_l + pad_r) / PX_PER_IN) * PX_PER_IN
+
+            sub_elements = flat_extract(child, css_rules, child_style, slide_width_px, content_width_px=cell_internal_width_px)
             # If container has visible background/border, prepend a shape for it
             # and strip child elements' shape wrappers (they inherit the container bg)
             if has_visible_bg_or_border(child_style) or has_grad:
@@ -1572,6 +1574,14 @@ def build_grid_children(
                 shape['bounds'] = {'x': 0, 'y': 0, 'width': item_width_in, 'height': 3.0}
                 if has_grad:
                     shape['styles']['backgroundImage'] = bg_img
+                # Store CSS padding on the bg shape for use in layout
+                _expand_padding(child_style)
+                shape['_css_pad_l'] = parse_px(child_style.get('paddingLeft', '0px')) / PX_PER_IN
+                shape['_css_pad_r'] = parse_px(child_style.get('paddingRight', '0px')) / PX_PER_IN
+                shape['_css_pad_t'] = parse_px(child_style.get('paddingTop', '0px')) / PX_PER_IN
+                shape['_css_pad_b'] = parse_px(child_style.get('paddingBottom', '0px')) / PX_PER_IN
+                shape['_css_border_l'] = parse_px(child_style.get('borderLeftWidth', child_style.get('borderLeft', '0px').split()[0] if child_style.get('borderLeft', '') else '0px')) / PX_PER_IN
+                shape['_css_text_align'] = child_style.get('textAlign', 'left')
                 # Filter out shape elements from children that only exist because of inherited bg
                 content_only = [e for e in sub_elements if e.get('type') != 'shape' or e.get('text')]
                 sub_elements = [shape] + content_only
@@ -1691,17 +1701,22 @@ def build_grid_children(
 
         # Layout elements: background shapes overlap content, content stacks vertically
         # Detect if this group has a background shape (card-style item)
-        has_bg_shape = any(
-            e.get('type') == 'shape' and not e.get('text') and e['bounds'].get('height', 0) >= 1.0
-            for e in group
-        )
-        # Only apply card padding when there's a background shape
+        bg_shape_elem = None
+        for e in group:
+            if (e.get('type') == 'shape' and not e.get('text')
+                    and e['bounds'].get('height', 0) >= 1.0):
+                bg_shape_elem = e
+                break
+        has_bg_shape = bg_shape_elem is not None
+        # Use CSS padding from bg shape if available, otherwise defaults
         if has_bg_shape:
-            pad_t = 15.0 / PX_PER_IN
-            pad_x = 15.0 / PX_PER_IN
+            pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+            pad_x = bg_shape_elem.get('_css_pad_l', 15.0 / PX_PER_IN)
+            border_l = bg_shape_elem.get('_css_border_l', 0.0)
         else:
             pad_t = 0.0
             pad_x = 0.0
+            border_l = 0.0
 
         group_y = item_y + pad_t
         for elem in group:
@@ -1719,32 +1734,45 @@ def build_grid_children(
                 results.append(elem)
                 continue  # Don't advance group_y
             if elem.get('type') in ('text', 'shape'):
-                b['x'] = item_x + pad_x
+                b['x'] = item_x + pad_x + border_l
                 b['y'] = group_y
-                # For text elements, use natural text width (centered within card)
-                # instead of the full card content width
+                # For text elements, decide whether to use constrained width or shrink-wrap
                 if elem.get('type') == 'text':
-                    elem_text = elem.get('text', '')
-                    elem_styles = elem.get('styles', {})
-                    elem_font_px = parse_px(elem_styles.get('fontSize', '16px'))
-                    if elem_font_px <= 0:
-                        elem_font_px = 16.0
-                    # Use widest line for multiline text
-                    max_line_px = 0.0
-                    for line in elem_text.split('\n'):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        line_cjk = sum(1 for c in line if ord(c) > 127)
-                        line_latin = len(line) - line_cjk
-                        line_w = line_cjk * elem_font_px + line_latin * elem_font_px * 0.55
-                        if line_w > max_line_px:
-                            max_line_px = line_w
-                    natural_w = max_line_px / PX_PER_IN
-                    b['width'] = natural_w + 0.1  # small padding
-                    # Center text within the card
-                    card_content_w = this_item_width - 2 * pad_x
-                    b['x'] = item_x + pad_x + (card_content_w - b['width']) / 2
+                    orig_w = b.get('width', 0)
+                    pad_r_val = bg_shape_elem.get('_css_pad_r', pad_x) if bg_shape_elem else pad_x
+                    card_content_w = this_item_width - pad_x - pad_r_val if bg_shape_elem else this_item_width - 2 * pad_x
+                    css_text_align = bg_shape_elem.get('_css_text_align', 'left') if bg_shape_elem else 'left'
+                    tag = elem.get('tag', '')
+                    is_block_text = tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li')
+                    if is_block_text and orig_w > 0.5:
+                        # Block text inside card: use full content width
+                        b['width'] = card_content_w - border_l
+                        if css_text_align == 'center':
+                            # Centered card (stat cards): center the full-width text frame
+                            b['x'] = item_x + pad_x
+                        else:
+                            # Left-aligned card: position after padding + border
+                            b['x'] = item_x + pad_x + border_l
+                    else:
+                        # Short/plain text: shrink-wrap to natural width and center
+                        elem_text = elem.get('text', '')
+                        elem_styles = elem.get('styles', {})
+                        elem_font_px = parse_px(elem_styles.get('fontSize', '16px'))
+                        if elem_font_px <= 0:
+                            elem_font_px = 16.0
+                        max_line_px = 0.0
+                        for line in elem_text.split('\n'):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            line_cjk = sum(1 for c in line if ord(c) > 127)
+                            line_latin = len(line) - line_cjk
+                            line_w = line_cjk * elem_font_px + line_latin * elem_font_px * 0.55
+                            if line_w > max_line_px:
+                                max_line_px = line_w
+                        natural_w = max_line_px / PX_PER_IN
+                        b['width'] = natural_w + 0.1  # small padding
+                        b['x'] = item_x + pad_x + border_l + (card_content_w - b['width']) / 2
                 else:
                     b['width'] = this_item_width - 2 * pad_x
                 group_y += b['height'] + 0.05
