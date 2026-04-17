@@ -1,52 +1,74 @@
-# Session Fix: Slide 2 clean + margin shorthand + info div code pill
+# Slide 2 Optimization: 6.3 → 8.7/10
+
+## Slide Structure
+
+HTML: `<section class="slide">` with `justify-content:center; padding:clamp(28px,4vw,56px)`
+
+```
+div[max-width:860px]
+  ├── span.pill (inline-block, "为什么选择 slide-creator")
+  ├── h2.gt ("传统工具限制了你")
+  ├── div.divider
+  ├── div.cols2 (grid 2-col)
+  │   ├── div.g[border-left:4px #ef4444, padding:22px 24px]
+  │   │   ├── h4 ("❌ 传统方法")
+  │   │   └── ul.bl[gap:7px] > 5×li
+  │   └── div.g[border-left:4px #10b981, padding:22px 24px]
+  │       ├── h4 ("✓ slide-creator")
+  │       └── ul.bl[gap:7px] > 5×li
+  └── div.info[padding:12px 16px, border-left:4px #2563EB]
+```
 
 ## Fixes Applied
 
-### Fix 1: Info div pill children absorption
+### 1. maxWidth Constraint Propagation (Session 13)
+- `build_text_element`: `effective_max_w` falls back to `content_width_px`
+- `layout_slide_elements`: always uses `max_constraint` over `max_text_width`
+- All 3 call sites pass `content_width_px` to `build_text_element`
 
-**Problem:** `<code>` elements inside `.info` divs were extracted as separate block elements, positioned after the info text. On slide 2, the code pill `[数据待填写]` was at y=5.657 instead of being inline with the info text at y=5.210. This pushed max_y up by ~0.48", inflating the content height and reducing the centering offset.
+### 2. Grid Cell Internal Width (Session 13)
+- `build_grid_children`: computes `cell_internal_width_px = (item_width_in - padding) * PX_PER_IN`
+- Passes to nested `flat_extract` calls so `<li>` in `<ul>` use available width
 
-**Root cause:** `flat_extract` checked `has_pill_children` for info divs. Since `<code>` has a visible background, `has_pill_children=True` and the info div was NOT treated as a leaf text container. The `<code>` child was extracted separately.
+### 3. Block Text Width in Grid Layout (Session 14)
+- Grid bg shapes store CSS padding (`_css_pad_l/r/t/b`), border (`_css_border_l`), textAlign (`_css_text_align`)
+- Block text tags (h1-h6, p, li) use full `card_content_w`, left-align when `textAlign != 'center'`
+- Short/plain text uses `natural_w + 0.1`, centered within card
+- Stat cards (Slide 1) with `textAlign:center` still centered correctly
 
-**Fix:** For info divs specifically, override `has_pill_children=False` so they're treated as leaf containers. The code text stays inline within the info text (as a text segment), not a separate element.
+### 4. Panel Height via CSS Padding (Session 14)
+- `item_h` uses `_css_pad_t` and `_css_pad_b` from bg shape instead of hardcoded 15px
+- Internal gap computation: li elements use 7px gap (from `ul.bl` CSS), others use 0.05"
 
-### Fix 2: Margin shorthand expansion
+### 5. CSS Gap for Li Elements (Session 14)
+- Grid layout: `group_y += b['height'] + 7.0/PX_PER_IN` for `<li>` elements
+- `item_h` calculation accounts for li-specific gap vs default gap
 
-**Problem:** CSS `margin: 8px 0 14px` shorthand on `.divider` was not expanded into individual `marginTop`/`marginBottom` properties. The gap computation in `layout_slide_elements` reads `marginBottom` to determine spacing between elements. Without expansion, it fell back to 0.15" default instead of 14px/108 = 0.130".
+### 6. Inline-Block Pill Width (Session 14)
+- `build_text_element`: inline-block elements include CSS `paddingLeft + paddingRight` in width
+- `flat_extract` pill shape: no longer double-adds padding (text_el already includes it)
+- Only applies to `is_inline_block=True` to avoid affecting stat card text
 
-**Fix:** Added `_expand_margin()` function (mirrors `_expand_padding()`) to parse `margin` shorthand into `marginTop`, `marginRight`, `marginBottom`, `marginLeft`. Called from `compute_element_style()`.
+### 7. Info Box Border (Session 14)
+- `flat_extract` inline-child path: stores `borderLeft` style on paired shape
+- Info box left border bar exported as decoration shape
 
-### Fix 3: Card padding from CSS instead of hardcoded values
+## Remaining Issues (8.7 → 9.5 target)
 
-**Problem:** The layout pass in `build_grid_children` used hardcoded 28px/24px for card padding, but the actual CSS on `.g` cards is `padding:22px 24px` (22px top/bottom). This made cards ~0.05" taller than they should be.
+| Issue | dw/dh/dy | Root Cause | Fix Needed |
+|-------|----------|------------|------------|
+| Pill width | dw=0.308" | letter-spacing 0.05em not in width calc | Add letter-spacing to content_w_in |
+| Pill height | dh=0.065" | height calc doesn't match golden | Check line-height multiplier |
+| Last 2 li Y drift | dy=0.115-0.133" | cumulative gap error from panel bottom | Li height 0.249" vs golden 0.263" |
+| Info text height | dh=0.150" | 0.421" vs 0.572" — wrapping difference | Check line-height for info text |
+| Shape match | 3 mismatches | Comparison script confused info box bg with border | Not a real export issue |
 
-**Fix:** Read `paddingTop`/`paddingBottom` from the card's actual styles instead of hardcoded values. Applied in both the height computation pass (line ~2412) and the positioning pass (line ~2452).
+## Key Measurements (Slide 2)
 
-## Results
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Overall score | 9.6/10 | 9.7/10 |
-| Slide 1 | clean | clean |
-| Slide 2 | 5 issues | clean |
-| Slide 3 | 1 issue | 1 issue (dx=0.45" dy=0.80") |
-| Slide 4 | clean | clean |
-| Slide 5 | clean | clean |
-| Slide 6 | 5 issues | 5 issues |
-| Slide 7 | 11 issues | 12 issues |
-| Slide 8 | 11 issues | 11 issues |
-| Slide 9 | clean | clean |
-| Slide 10 | clean | 4 issues (regression) |
-| Total issues | 33 | 33 |
-
-## Key Insight: Wrong --height flag
-
-During testing, `--height 810` was used (slide_h=7.5") instead of the default `--height 900` (slide_h=8.333"). This caused the centering formula to compute wrong offsets. The golden uses 900px height.
-
-## Remaining Issues
-
-1. **Slide 3**: Single text element at dx=0.45" dy=0.80" — flex-column layout with layer divs
-2. **Slide 6**: 5 issues with x and y offsets on card content
-3. **Slide 7**: 12 issues — complex layout with presenter mode info
-4. **Slide 8**: 11 issues — grid card positions shifted
-5. **Slide 10**: 4 issues — large dy offsets (0.71"-1.68"), possible regression from content height changes
+| Element | Golden | Sandbox | Diff |
+|---------|--------|---------|------|
+| Pill pos | (2.685, 2.153) | (2.684, 2.261) | dx=0.001, dy=0.107 |
+| Panel bg size | 3.906×2.383 | 3.906×2.193 | dh=0.189 |
+| H4 pos | (2.944, 3.439) | (2.944, 3.529) | dx=0, dy=0.090 |
+| Li pos (all) | x=2.944 | x=2.944 | dx=0 (perfect) |
+| Info text pos | (2.685, 5.738) | (2.684, 5.781) | dx=0.001, dy=0.043 |
