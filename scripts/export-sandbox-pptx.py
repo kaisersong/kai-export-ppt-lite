@@ -1693,8 +1693,14 @@ def build_grid_children(
                 # Card: use CSS padding from bg shape
                 card_pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
                 card_pad_b = bg_shape_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
-                # Internal gap matches the actual layout gap (0.05" between elements)
-                internal_gap = 0.05 * max(text_count - 1, 0)
+                # Internal gap: use CSS gap for li elements, default 0.05" for others
+                li_count = sum(1 for e in group if e.get('tag') == 'li')
+                non_li_count = text_count - li_count
+                li_gap = 7.0 / PX_PER_IN  # ul.bl gap: 7px
+                other_gap = 0.05
+                internal_gap = (li_gap * max(li_count - 1, 0) +
+                                other_gap * max(non_li_count, 0) +
+                                other_gap * min(li_count, 1) * min(non_li_count, 1))
                 item_h = text_h_total + card_pad_t + card_pad_b + internal_gap
             else:
                 internal_gap = 0.05 * max(text_count - 1, 0)
@@ -1773,7 +1779,11 @@ def build_grid_children(
                         b['x'] = item_x + pad_x + border_l + (card_content_w - b['width']) / 2
                 else:
                     b['width'] = this_item_width - 2 * pad_x
-                group_y += b['height'] + 0.05
+                # Use CSS gap for li elements (from <ul> gap:7px) vs default 0.05"
+                if elem.get('tag') == 'li':
+                    group_y += b['height'] + 7.0 / PX_PER_IN  # ul.bl gap: 7px
+                else:
+                    group_y += b['height'] + 0.05
             elif elem.get('type') == 'table':
                 b['x'] = item_x
                 b['y'] = group_y
