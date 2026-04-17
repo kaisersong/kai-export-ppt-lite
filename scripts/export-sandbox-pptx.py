@@ -88,8 +88,8 @@ _ROOT_CSS_VARS: Dict[str, str] = {}
 def resolve_css_variables(css_text: str) -> str:
     """Resolve :root CSS custom properties (var(--name) and var(--name, fallback))."""
     global _ROOT_CSS_VARS
-    root_match = re.search(r':root\s*\{([^}]+)\}', css_text)
-    if root_match:
+    # Match ALL :root blocks (there may be multiple)
+    for root_match in re.finditer(r':root\s*\{((?:[^{}]|\{[^{}]*\})*)\}', css_text, re.DOTALL):
         for prop_match in re.finditer(r'(--[\w-]+)\s*:\s*([^;]+);', root_match.group(1)):
             _ROOT_CSS_VARS[prop_match.group(1)] = prop_match.group(2).strip()
 
@@ -229,6 +229,14 @@ def _match_simple_selector(element: Tag, selector: str) -> bool:
         if isinstance(classes, str):
             classes = classes.split()
         return tag_ok and elem_class_match.group(2) in classes
+    # Handle compound class selectors like .slide.chapter
+    compound_class_match = re.match(r'^\.([\w-]+)\.([\w-]+)(?:\.([\w-]+))?$', sel_base)
+    if compound_class_match:
+        classes = element.get('class', [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        required_classes = [compound_class_match.group(i) for i in range(1, 4) if compound_class_match.group(i)]
+        return all(rc in classes for rc in required_classes)
     elem_id_match = re.match(r'^([\w-]+)#([\w-]+)$', sel_base)
     if elem_id_match:
         return (elem_id_match.group(1).lower() == tag_name.lower() and
@@ -250,7 +258,9 @@ def compute_element_style(
                 computed[prop] = parent_style[prop]
     for rule in css_rules:
         if selector_matches(element, rule.selector):
-            computed.update(rule.properties)
+            # Convert CSS rule properties from kebab-case to camelCase
+            for prop, val in rule.properties.items():
+                computed[_kebab_to_camel(prop)] = val
     if inline_style_str:
         # Resolve CSS variables in inline style values
         resolved_inline = resolve_css_variables_inline(inline_style_str)
@@ -259,7 +269,22 @@ def compute_element_style(
             computed[prop_name] = prop_match.group(2).strip()
     # Expand padding shorthand (padding: X Y → paddingTop/Left/etc)
     _expand_padding(computed)
+    # Expand margin shorthand (margin: X Y → marginTop/Bottom/etc) for layout
+    _expand_margin(computed)
+    # Expand background shorthand (background: linear-gradient(...) → backgroundImage)
+    _expand_background_shorthand_inplace(computed)
     return computed
+
+
+def _expand_background_shorthand_inplace(computed: Dict[str, str]) -> None:
+    """Expand CSS background shorthand into backgroundImage/backgroundColor if needed."""
+    bg = computed.get('background', '')
+    if not bg:
+        return
+    if 'gradient' in bg or 'url(' in bg:
+        expanded = _expand_background_shorthand(bg)
+        for key, val in expanded.items():
+            computed.setdefault(key, val)
 
 
 def resolve_css_variables_inline(css_value: str) -> str:
@@ -271,12 +296,71 @@ def resolve_css_variables_inline(css_value: str) -> str:
     return re.sub(r'var\((--[\w-]+)(?:,\s*([^)]+))?\)', replace_var, css_value)
 
 
+def _expand_margin(computed: Dict[str, str]) -> None:
+    """Expand margin shorthand in-place for layout calculations."""
+    if 'margin' not in computed:
+        return
+    vals = _split_css_values(computed['margin'])
+    # Accept px values, clamp(), auto, 0, and negative values
+    px = [v for v in vals if 'px' in v or v.startswith('clamp(') or v == 'auto' or v == '0' or (v.startswith('-') and 'px' in v)]
+    if len(px) == 1:
+        for key in ('marginTop', 'marginRight', 'marginBottom', 'marginLeft'):
+            if key not in computed:
+                computed[key] = px[0]
+    elif len(px) == 2:
+        if 'marginTop' not in computed:
+            computed['marginTop'] = computed['marginBottom'] = px[0]
+        if 'marginLeft' not in computed:
+            computed['marginLeft'] = computed['marginRight'] = px[1]
+    elif len(px) == 3:
+        if 'marginTop' not in computed:
+            computed['marginTop'] = px[0]
+        if 'marginLeft' not in computed:
+            computed['marginLeft'] = computed['marginRight'] = px[1]
+        if 'marginBottom' not in computed:
+            computed['marginBottom'] = px[2]
+    elif len(px) == 4:
+        if 'marginTop' not in computed:
+            computed['marginTop'] = px[0]
+        if 'marginRight' not in computed:
+            computed['marginRight'] = px[1]
+        if 'marginBottom' not in computed:
+            computed['marginBottom'] = px[2]
+        if 'marginLeft' not in computed:
+            computed['marginLeft'] = px[3]
+    # Remove the shorthand to prevent re-expansion
+    del computed['margin']
+
+
+def _split_css_values(css_value: str) -> List[str]:
+    """Split a CSS multi-value property respecting parentheses (for clamp(), etc.)."""
+    parts = []
+    current = []
+    depth = 0
+    for ch in css_value:
+        if ch == '(':
+            depth += 1
+            current.append(ch)
+        elif ch == ')':
+            depth -= 1
+            current.append(ch)
+        elif ch == ' ' and depth == 0:
+            if current:
+                parts.append(''.join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append(''.join(current))
+    return parts
+
+
 def _expand_padding(computed: Dict[str, str]) -> None:
     """Expand padding shorthand in-place. Used only for pill/badge shape width calculation."""
     if 'padding' not in computed:
         return
-    vals = computed['padding'].split()
-    px = [v for v in vals if re.match(r'[\d.]+px', v)]
+    vals = _split_css_values(computed['padding'])
+    px = [v for v in vals if 'px' in v or v.startswith('clamp(')]
     if len(px) == 1:
         computed['paddingTop'] = computed['paddingRight'] = computed['paddingBottom'] = computed['paddingLeft'] = px[0]
     elif len(px) == 2:
@@ -320,16 +404,106 @@ def parse_color(css_color: str, bg: Tuple[int, int, int] = (255, 255, 255)) -> O
 
 
 def px_to_pt(px_value: str) -> float:
-    m = re.search(r'([\d.]+)px', str(px_value))
+    """Convert a CSS length value to points (1pt = 1/72in, 1px ≈ 0.75pt at 96 DPI)."""
+    px_value = str(px_value)
+    # Handle clamp() expressions
+    if px_value.startswith('clamp('):
+        resolved_px = resolve_clamp(px_value)
+        if resolved_px > 0:
+            return round(resolved_px * 0.75, 1)
+        return 12.0
+    m = re.search(r'([\d.]+)px', px_value)
     if m:
         return round(float(m.group(1)) * 0.75, 1)
+    # Handle rem/em values
+    m = re.search(r'([\d.]+)rem', px_value)
+    if m:
+        return round(float(m.group(1)) * 16.0 * 0.75, 1)
+    m = re.search(r'([\d.]+)em', px_value)
+    if m:
+        return round(float(m.group(1)) * 16.0 * 0.75, 1)
     return 12.0
 
 
+# Viewport width in pixels for resolving CSS clamp() expressions
+VIEWPORT_WIDTH_PX = 1440.0
+
+
+def resolve_clamp(clamp_str: str) -> float:
+    """Resolve a CSS clamp(min, preferred, max) expression to pixels."""
+    m = re.match(r'clamp\s*\(\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+?)\s*\)', clamp_str.strip())
+    if not m:
+        # Try clamp(min, max) with two args
+        m = re.match(r'clamp\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)', clamp_str.strip())
+        if not m:
+            return 0.0
+        return _resolve_css_length(m.group(1))
+    min_val = _resolve_css_length(m.group(1))
+    preferred = _resolve_css_length(m.group(2))
+    max_val = _resolve_css_length(m.group(3))
+    return min(max(min_val, preferred), max_val)
+
+
+def _resolve_css_length(val_str: str) -> float:
+    """Convert a CSS length value to pixels."""
+    val_str = val_str.strip()
+    m = re.match(r'^([\d.]+)px$', val_str)
+    if m:
+        return float(m.group(1))
+    m = re.match(r'^([\d.]+)rem$', val_str)
+    if m:
+        return float(m.group(1)) * 16.0  # 1rem = 16px
+    m = re.match(r'^([\d.]+)em$', val_str)
+    if m:
+        return float(m.group(1)) * 16.0
+    m = re.match(r'^([\d.]+)vw$', val_str)
+    if m:
+        return float(m.group(1)) / 100.0 * VIEWPORT_WIDTH_PX
+    m = re.match(r'^([\d.]+)(?:vh|vmin)$', val_str)
+    if m:
+        return float(m.group(1)) / 100.0 * VIEWPORT_WIDTH_PX * 0.75  # assume 4:3
+    m = re.match(r'^([\d.]+)(?:in)$', val_str)
+    if m:
+        return float(m.group(1)) * 96.0
+    m = re.match(r'^([\d.]+)cm$', val_str)
+    if m:
+        return float(m.group(1)) * 96.0 / 2.54
+    m = re.match(r'^([\d.]+)mm$', val_str)
+    if m:
+        return float(m.group(1)) * 96.0 / 25.4
+    m = re.match(r'^([\d.]+)$', val_str)
+    if m:
+        return float(m.group(1))  # bare number treated as px
+    return 0.0
+
+
 def parse_px(val: str) -> float:
+    """Parse a CSS length value to a raw number (for legacy callers expecting pixel-like values)."""
     if not val or val in ('0px', '0', 'auto', 'none', 'normal', ''):
         return 0.0
-    m = re.search(r'([\d.]+)', str(val))
+    # Handle clamp() expressions
+    if val.strip().startswith('clamp('):
+        resolved = resolve_clamp(val)
+        if resolved > 0:
+            return resolved
+    # Try to parse with unit support
+    val = val.strip()
+    m = re.match(r'^(-?[\d.]+)rem$', val)
+    if m:
+        return float(m.group(1)) * 16.0
+    m = re.match(r'^(-?[\d.]+)em$', val)
+    if m:
+        return float(m.group(1)) * 16.0
+    m = re.match(r'^(-?[\d.]+)vw$', val)
+    if m:
+        return float(m.group(1)) * 14.4  # 1vw = 14.4px at 1440px viewport
+    m = re.match(r'^(-?[\d.]+)vh$', val)
+    if m:
+        return float(m.group(1)) * 9.0  # 1vh = 9.0px at 900px viewport
+    m = re.match(r'^(-?[\d.]+)px$', val)
+    if m:
+        return float(m.group(1))
+    m = re.search(r'(-?[\d.]+)', str(val))
     return float(m.group(1)) if m else 0.0
 
 
@@ -365,6 +539,25 @@ def has_visible_bg_or_border(style: Dict[str, str]) -> bool:
         if bs and 'none' not in bs and not bs.startswith('0px') and bs != '0px':
             return True
     return False
+
+
+def _should_create_bg_shape(style: Dict[str, str], has_gradient_bg: bool = False) -> bool:
+    """Check if a shape should be created for this element's background.
+
+    Returns False when the gradient is applied via background-clip:text —
+    in that case the gradient colors the text itself, not a background shape.
+    """
+    # background-clip:text means the gradient paints on text, not on a shape
+    # Note: kebab-to-camel makes -webkit-background-clip → WebkitBackgroundClip
+    bg_clip = (style.get('webkitBackgroundClip', '') or
+               style.get('WebkitBackgroundClip', '') or
+               style.get('backgroundClip', ''))
+    text_fill = (style.get('webkitTextFillColor', '') or
+                 style.get('WebkitTextFillColor', '') or
+                 style.get('textFillColor', ''))
+    if bg_clip == 'text' and text_fill:
+        return False
+    return has_visible_bg_or_border(style) or has_gradient_bg
 
 
 def is_leaf_text_container(element: Tag, css_rules: Optional[List] = None) -> bool:
@@ -440,7 +633,7 @@ def compute_text_content_width(element: Tag, css_rules: List[CSSRule], parent_st
                 font_size_px = 16.0
             cjk = sum(1 for c in txt if ord(c) > 127)
             latin = len(txt) - cjk
-            text_w = (cjk * font_size_px + latin * font_size_px * 0.55) / PX_PER_IN
+            text_w = (cjk * font_size_px * 0.96 + latin * font_size_px * 0.55) / PX_PER_IN
             # Add small padding
             text_w += 0.1
             if text_w > max_w:
@@ -524,7 +717,9 @@ def extract_text_segments(
         # Color
         color = inherited_color
         bi = style.get('backgroundImage', '')
-        bc = style.get('webkitBackgroundClip', style.get('backgroundClip', ''))
+        bc = (style.get('webkitBackgroundClip', '') or
+              style.get('WebkitBackgroundClip', '') or
+              style.get('backgroundClip', ''))
         if 'gradient' in bi and bc == 'text':
             cm = re.findall(r'rgba?\([^)]+\)', bi)
             if cm:
@@ -626,11 +821,26 @@ def build_image_element(element: Tag, style: Dict[str, str]) -> Optional[Dict]:
 
 def build_shape_element(element: Tag, style: Dict[str, str], slide_width_px: float = 1440) -> Dict:
     """Build a shape element IR (div with background/border)."""
-    border_radius_px = resolve_border_radius(style, parse_px(style.get('width', '100%')),
-                                                parse_px(style.get('height', '100px')))
+    w_px = parse_px(style.get('width', ''))
+    h_px = parse_px(style.get('height', ''))
+    if w_px > 0 and h_px > 0:
+        # Element has explicit CSS dimensions (e.g., divider, pill)
+        w_in = w_px / PX_PER_IN
+        h_in = h_px / PX_PER_IN
+    else:
+        # Check maxWidth as fallback constraint
+        max_w_px = parse_px(style.get('maxWidth', ''))
+        if max_w_px > 0:
+            w_in = max_w_px / PX_PER_IN
+        else:
+            w_in = 12.33
+        h_in = 1.0
+
+    border_radius_px = resolve_border_radius(style, w_px or parse_px(style.get('maxWidth', '100%')),
+                                                h_px or parse_px(style.get('maxHeight', '100px')))
     return {
         'type': 'shape', 'tag': element.name,
-        'bounds': {'x': 0.5, 'y': 0.5, 'width': 12.33, 'height': 1.0},
+        'bounds': {'x': 0.5, 'y': 0.5, 'width': w_in, 'height': h_in},
         'styles': {
             'backgroundColor': style.get('backgroundColor', ''),
             'backgroundImage': style.get('backgroundImage', ''),
@@ -640,6 +850,9 @@ def build_shape_element(element: Tag, style: Dict[str, str], slide_width_px: flo
             'borderTop': style.get('borderTop', ''),
             'borderBottom': style.get('borderBottom', ''),
             'borderRadius': f'{border_radius_px}px',
+            'marginBottom': style.get('marginBottom', ''),
+            'marginLeft': style.get('marginLeft', ''),
+            'marginRight': style.get('marginRight', ''),
         },
     }
 
@@ -702,6 +915,11 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
         width_in = min(content_w_in + 0.2, cw_in)  # content width + small padding, capped
 
     default_w_in = 13.33 - 1.0  # default bounds width
+    # Use maxWidth from style or fallback to content_width_px (inherited parent constraint)
+    effective_max_w = max_w if max_w > 0 else (content_width_px if content_width_px and content_width_px > 0 else 0)
+    # Cap default width by explicit maxWidth constraint
+    if effective_max_w > 0:
+        default_w_in = min(default_w_in, effective_max_w / PX_PER_IN)
     if width_in is None:
         # For inline/inline-block elements, use content width; for block, use full width
         if is_inline_block or content_w_in < default_w_in * 0.5:
@@ -721,14 +939,24 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
         line_height_px = font_size_px * 0.82  # PPTX renders tighter than HTML line-height
     total_height_px = line_count * line_height_px
 
+    # Add CSS padding to height (for pill/badge elements with padding)
+    pad_t = parse_px(style.get('paddingTop', ''))
+    pad_b = parse_px(style.get('paddingBottom', ''))
+    if pad_t > 0 or pad_b > 0:
+        total_height_px += pad_t + pad_b
+
+    slide_height_scale = slide_width_px / 13.33
+    # Minimum height: 0.15" for small inline elements (pills, badges)
+    min_h = 0.15
+
     return {
         'type': 'text', 'tag': element.name, 'text': text, 'segments': segments,
         'gradientColors': None, 'textTransform': style.get('textTransform', 'none'),
-        'naturalHeight': total_height_px / (slide_width_px / 13.33),
+        'naturalHeight': total_height_px / slide_height_scale,
         'bounds': {
             'x': 0.5, 'y': 0.5,
             'width': width_in,
-            'height': max(total_height_px / (slide_width_px / 13.33), 0.3),
+            'height': max(total_height_px / slide_height_scale, min_h),
         },
         'styles': {
             'fontSize': style.get('fontSize', '16px'),
@@ -743,6 +971,7 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             'paddingRight': style.get('paddingRight', '0px'),
             'paddingTop': style.get('paddingTop', '0px'),
             'paddingBottom': style.get('paddingBottom', '0px'),
+            'marginBottom': style.get('marginBottom', ''),
             'alignItems': style.get('alignItems', ''),
             'justifyContent': style.get('justifyContent', ''),
             'width': style.get('width', ''),
@@ -893,12 +1122,9 @@ def flat_extract(
         return [img_el] if img_el else []
 
     if tag == 'svg':
-        return [{
-            'type': 'image', 'tag': 'svg', 'imageKind': 'svg',
-            'source': str(element),
-            'bounds': {'x': 0.5, 'y': 0.5, 'width': 4, 'height': 3},
-            'styles': {'borderRadius': '', 'objectFit': ''},
-        }]
+        # Skip decorative SVGs (ambient orbs, cloud filters) — golden reference
+        # doesn't include these as PPTX shapes
+        return []
 
     # Tables
     if tag == 'table':
@@ -911,6 +1137,10 @@ def flat_extract(
         pill_elements = set()  # Track which children are pills, to exclude from combined text
         for child in element.children:
             if isinstance(child, Tag) and child.name in INLINE_TAGS:
+                # Skip <code> and <kbd> — these are semantic inline elements that should
+                # stay as part of the parent text, not extracted as separate pills
+                if child.name in ('code', 'kbd'):
+                    continue
                 child_s = compute_element_style(child, css_rules, child.get('style', ''))
                 if has_visible_bg_or_border(child_s):
                     child_text = get_text_content(child).strip()
@@ -1007,6 +1237,18 @@ def flat_extract(
         has_url_bg = bg_image != 'none' and 'url(' in bg_image
         total_text = get_text_content(element).strip()
 
+        # Skip absolute-positioned decorative elements (ambient orbs, cloud layers)
+        # These don't appear as shapes in the golden PPTX
+        pos = style.get('position', '')
+        filter_val = style.get('filter', '')
+        pointer_events = style.get('pointerEvents', '')
+        if (pos == 'absolute' and not total_text and
+            ('blur' in filter_val or pointer_events == 'none')):
+            return []
+        # Skip cloud layers and other filter-based decorative containers
+        if filter_val and ('url(#' in filter_val) and not total_text:
+            return []
+
         # Background image with no text → raster
         if has_url_bg and not total_text:
             return [{
@@ -1071,10 +1313,12 @@ def flat_extract(
 
         # Leaf text container: entire content is text (with inline formatting)
         if is_leaf_text_container(element, css_rules):
-            text_el = build_text_element(element, style, css_rules, slide_width_px)
+            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
             if text_el:
                 results = []
-                if has_visible_bg_or_border(style) or has_gradient_bg:
+                # Only create background shape if this element actually has a visible
+                # background/border (not background-clip:text which paints on text only)
+                if _should_create_bg_shape(style, has_gradient_bg):
                     shape = build_shape_element(element, style, slide_width_px)
                     shape['bounds'] = dict(text_el['bounds'])
                     if has_gradient_bg:
@@ -1090,8 +1334,54 @@ def flat_extract(
             return []
 
         # Standard container: recurse into children
+        # First check: if ALL child Tags are inline elements (strong, em, code, etc.)
+        # and the container has visible bg/border with text content, treat it as a
+        # leaf text element — the inline elements are just styled text within one shape.
+        # This handles cases like .info divs with <strong> and <code> children.
+        child_tags = [c for c in element.children if isinstance(c, Tag)]
+        all_inline = bool(child_tags) and all(c.name.lower() in INLINE_TAGS for c in child_tags)
+        if all_inline and total_text and has_visible_bg_or_border(style):
+            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
+            if text_el:
+                # For inline-child containers, set shape width from text content + padding
+                # (build_text_element may default to full slide width for long text)
+                pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
+                pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+                pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
+                pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
+                # Compute content-based width
+                font_size_px = parse_px(style.get('fontSize', '16px'))
+                if font_size_px <= 0:
+                    font_size_px = 16.0
+                cjk = sum(1 for c in total_text if ord(c) > 127)
+                latin = len(total_text) - cjk
+                text_w_in = (cjk * font_size_px + latin * font_size_px * 0.55) / PX_PER_IN
+                shape_w = text_w_in + pad_l + pad_r
+                shape_h = text_el['bounds']['height'] + pad_t + pad_b
+                shape = {
+                    'type': 'shape', 'tag': element.name,
+                    'bounds': {'x': 0.5, 'y': 0.5, 'width': shape_w, 'height': shape_h},
+                    'styles': {'backgroundColor': style.get('backgroundColor', '')},
+                    'naturalHeight': shape_h,
+                }
+                if style.get('border', ''):
+                    shape['styles']['border'] = style['border']
+                if style.get('borderRadius', ''):
+                    shape['styles']['borderRadius'] = style['borderRadius']
+                # Pair shape with text
+                import uuid
+                pair_id = str(uuid.uuid4())[:8]
+                shape['_pair_with'] = pair_id
+                text_el['_pair_with'] = pair_id
+                return [shape, text_el]
+
         results = []
-        if has_visible_bg_or_border(style) or has_gradient_bg:
+
+        # Inherit parent maxWidth if this element doesn't have one
+        if content_width_px and not style.get('maxWidth', ''):
+            style['maxWidth'] = f'{content_width_px}px'
+
+        if _should_create_bg_shape(style, has_gradient_bg):
             shape = build_shape_element(element, style, slide_width_px)
             if has_gradient_bg:
                 shape['styles']['backgroundImage'] = bg_image
@@ -1232,7 +1522,7 @@ def build_grid_children(
             item_widths.append(tbl['bounds']['width'])
             continue
         if child_tag in TEXT_TAGS:
-            text_el = build_text_element(child, child_style, css_rules, slide_width_px)
+            text_el = build_text_element(child, child_style, css_rules, slide_width_px, content_width_px)
             if text_el:
                 group = []
                 if has_visible_bg_or_border(child_style):
@@ -1260,7 +1550,7 @@ def build_grid_children(
                 continue
 
             if is_leaf_text_container(child, css_rules):
-                text_el = build_text_element(child, child_style, css_rules, slide_width_px)
+                text_el = build_text_element(child, child_style, css_rules, slide_width_px, content_width_px)
                 if text_el:
                     group = []
                     if has_visible_bg_or_border(child_style) or has_grad:
@@ -1290,7 +1580,10 @@ def build_grid_children(
             # (element bounds may be full slide width for unconstrained text)
             text_w = compute_text_content_width(child, css_rules)
             if text_w > 0:
-                item_widths.append(text_w)
+                # Card items with background need padding added to content width
+                # Golden stat cards: text_width + ~0.5" padding (24px left + 24px right ≈ 0.5")
+                card_pad_in = 2 * 24.0 / PX_PER_IN  # ~0.5"
+                item_widths.append(text_w + card_pad_in)
             elif sub_elements:
                 # Use max element height as fallback (text elements' height is based on content)
                 text_h = sum(e['bounds'].get('height', 0.3) for e in sub_elements if e.get('type') == 'text')
@@ -1308,7 +1601,19 @@ def build_grid_children(
     # vs simple content grid (each child has single text element)
     has_multi_children = any(len(g) > 2 for g in child_groups)
 
-    if is_centered and num_items > 1 and not has_multi_children:
+    # Single-row centered flex: use per-item widths even with multi-element children
+    # (e.g., stat cards where each .g card has shape+text+text but varying widths)
+    is_single_row_centered = is_centered and num_items > 1 and num_cols == num_items
+
+    if is_single_row_centered:
+        # Centered single-row flex: use individual item widths
+        total_content_w = sum(item_widths) + (num_items - 1) * gap_in
+        x_start = margin_in + (available_width_in - total_content_w) / 2
+        current_x = x_start
+        for idx in range(num_items):
+            item_x_list.append(current_x)
+            current_x += item_widths[idx] + gap_in
+    elif is_centered and num_items > 1 and not has_multi_children:
         # Simple content grid (like stat-row): use individual item widths
         total_content_w = sum(item_widths) + (num_items - 1) * gap_in
         x_start = margin_in + (available_width_in - total_content_w) / 2
@@ -1343,8 +1648,8 @@ def build_grid_children(
             row_idx = idx
 
         item_x = item_x_list[idx]
-        # Use per-item width for simple grids, uniform width for multi-column grids
-        if is_centered and num_items > 1 and not has_multi_children:
+        # Use per-item width for centered single-row and simple grids
+        if is_single_row_centered or (is_centered and num_items > 1 and not has_multi_children):
             this_item_width = item_widths[idx] if idx < len(item_widths) else item_width_in
         else:
             this_item_width = item_width_in
@@ -1370,9 +1675,10 @@ def build_grid_children(
             )
             if grp_has_bg:
                 # Card: add padding + internal gaps
-                card_pad_t = 28.0 / PX_PER_IN
-                card_pad_b = 24.0 / PX_PER_IN
-                internal_gap = 0.20 * max(text_count - 1, 0)
+                # Golden stat cards: ~15px top/bottom padding, ~2px internal gap
+                card_pad_t = 15.0 / PX_PER_IN
+                card_pad_b = 15.0 / PX_PER_IN
+                internal_gap = 0.02 * max(text_count - 1, 0)
                 item_h = text_h_total + card_pad_t + card_pad_b + internal_gap
             else:
                 # No background (stat items, etc.): minimal gap between text elements
@@ -1391,8 +1697,8 @@ def build_grid_children(
         )
         # Only apply card padding when there's a background shape
         if has_bg_shape:
-            pad_t = 28.0 / PX_PER_IN
-            pad_x = 24.0 / PX_PER_IN
+            pad_t = 15.0 / PX_PER_IN
+            pad_x = 15.0 / PX_PER_IN
         else:
             pad_t = 0.0
             pad_x = 0.0
@@ -1415,7 +1721,32 @@ def build_grid_children(
             if elem.get('type') in ('text', 'shape'):
                 b['x'] = item_x + pad_x
                 b['y'] = group_y
-                b['width'] = this_item_width - 2 * pad_x
+                # For text elements, use natural text width (centered within card)
+                # instead of the full card content width
+                if elem.get('type') == 'text':
+                    elem_text = elem.get('text', '')
+                    elem_styles = elem.get('styles', {})
+                    elem_font_px = parse_px(elem_styles.get('fontSize', '16px'))
+                    if elem_font_px <= 0:
+                        elem_font_px = 16.0
+                    # Use widest line for multiline text
+                    max_line_px = 0.0
+                    for line in elem_text.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        line_cjk = sum(1 for c in line if ord(c) > 127)
+                        line_latin = len(line) - line_cjk
+                        line_w = line_cjk * elem_font_px + line_latin * elem_font_px * 0.55
+                        if line_w > max_line_px:
+                            max_line_px = line_w
+                    natural_w = max_line_px / PX_PER_IN
+                    b['width'] = natural_w + 0.1  # small padding
+                    # Center text within the card
+                    card_content_w = this_item_width - 2 * pad_x
+                    b['x'] = item_x + pad_x + (card_content_w - b['width']) / 2
+                else:
+                    b['width'] = this_item_width - 2 * pad_x
                 group_y += b['height'] + 0.05
             elif elem.get('type') == 'table':
                 b['x'] = item_x
@@ -1447,11 +1778,19 @@ def extract_slide_background(slide_el: Tag, css_rules: List[CSSRule]) -> Dict:
     result = {'solid': None, 'gradient': None, 'grid': None}
 
     if 'gradient' in bg_image:
+        # Try rgba() stops first, then fall back to hex colors
         stops = re.findall(r'rgba?\([^)]+\)', bg_image)
         if len(stops) >= 2:
             c1 = parse_color(stops[0])
             c2 = parse_color(stops[-1])
             if c1 and c2:
+                result['gradient'] = (c1, c2)
+        else:
+            # Fallback: extract hex colors from gradient
+            hex_stops = re.findall(r'#([0-9a-fA-F]{6})', bg_image)
+            if len(hex_stops) >= 2:
+                c1 = (int(hex_stops[0][0:2], 16), int(hex_stops[0][2:4], 16), int(hex_stops[0][4:6], 16))
+                c2 = (int(hex_stops[-1][0:2], 16), int(hex_stops[-1][2:4], 16), int(hex_stops[-1][4:6], 16))
                 result['gradient'] = (c1, c2)
 
     if not result['gradient']:
@@ -1533,7 +1872,30 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
         if cr_maxw and 'px' in cr_maxw:
             content_mw = parse_px(cr_maxw)
 
+        # When content_root IS the slide (no .slide-content found), the actual
+        # content width constraint may be on the first child <div> wrapper.
+        if content_mw is None and content_root is slide_html:
+            from bs4 import Tag
+            for child in content_root.children:
+                if isinstance(child, Tag) and child.name == 'div':
+                    child_style = compute_element_style(child, css_rules, child.get('style', ''))
+                    child_maxw = child_style.get('maxWidth', '')
+                    if child_maxw and 'px' in child_maxw:
+                        content_mw = parse_px(child_maxw)
+                    break
+
         elements = flat_extract(content_root, css_rules, body_style, slide_width_px=width_px, content_width_px=content_mw)
+
+        # Filter out background shapes created for the slide element itself
+        # (slide background is already extracted via extract_slide_background)
+        # When content_root IS the slide, shapes that match the slide's background gradient
+        # are duplicates — remove them
+        if content_root is slide_html:
+            elements = [e for e in elements if not (
+                e.get('type') == 'shape' and
+                e.get('tag') == content_root.name and
+                e.get('styles', {}).get('backgroundImage', '')
+            )]
         title = get_text_content(slide_html)[:50]
 
         print(f"  [{i+1}/{len(slides_html)}] {title}... ({len(elements)} elements)")
@@ -1552,28 +1914,72 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
 
 # ─── Layout Pass ──────────────────────────────────────────────────────────────
 
-def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, slide_height_in: float = 7.5, slide_style: Optional[Dict[str, str]] = None):
+def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, slide_height_in: float = 900/108, slide_style: Optional[Dict[str, str]] = None, slide_data: Optional[Dict] = None):
     """
     Simulate flex-column layout: stack elements vertically with padding.
     Handles container elements (grid/flex) by positioning them and adjusting children.
     Supports text-align: center for centered layouts and max-width constraints.
     Supports vertical centering when slide has justifyContent: center.
     """
-    internal_margin = 0.5
+    # Pre-mark pill text elements as _skip_layout (pill shapes already have this flag)
+    # Don't skip - let them participate in layout. The pill marginBottom
+    # naturally creates the gap before the title.
+
+    # Derive internal_margin from CSS padding (slide element's paddingTop)
+    # Golden starts content at y ≈ 2.15" for slides with clamp-based padding
+    default_margin = 0.5
+    if slide_style:
+        pt = slide_style.get('paddingTop', '')
+        if pt:
+            pt_px = parse_px(pt)
+            pt_in = pt_px / PX_PER_IN
+            if pt_in > 0:
+                default_margin = pt_in
+    internal_margin = default_margin
     current_y = internal_margin
     slide_margin = internal_margin
 
-    # Detect max-width constraint from elements that have it
-    # Skip full-width background shapes (section, etc.) - find first content element with maxWidth
+    # Propagate slide-level textAlign to all elements (e.g., chapter slides have
+    # text-align:center on the slide element, inherited by children)
+    if slide_style:
+        slide_ta = slide_style.get('textAlign', slide_style.get('text-align', ''))
+        if slide_ta:
+            for elem in elements:
+                elem_s = elem.get('styles', {})
+                if not elem_s.get('textAlign', ''):
+                    elem_s['textAlign'] = slide_ta
+
+    # Detect content width: use the widest text element's width, constrained by maxWidth
+    # First, find maxWidth constraint if any
+    max_constraint = None
     for elem in elements:
         s = elem.get('styles', {})
         mw = s.get('maxWidth', '')
         if mw and 'px' in mw:
             mw_in = parse_px(mw) / PX_PER_IN
-            content_area_width = mw_in
-            if content_area_width < slide_width_in - 2 * internal_margin:
-                slide_margin = (slide_width_in - content_area_width) / 2
+            max_constraint = mw_in
             break
+
+    # Find the widest text element's width
+    max_text_width = 0.0
+    for elem in elements:
+        if elem.get('type') == 'text' and not elem.get('_skip_layout'):
+            b = elem['bounds']
+            if b['width'] > max_text_width:
+                max_text_width = b['width']
+
+    # When there's an explicit maxWidth constraint, use it for the content area —
+    # individual text elements will be shrink-wrapped to their natural text width
+    # during the text layout pass. The constraint defines the left margin.
+    if max_constraint is not None:
+        content_area_width = max_constraint  # always use explicit constraint for margins
+    elif max_text_width > 0:
+        content_area_width = max_text_width
+    else:
+        content_area_width = None
+
+    if content_area_width is not None and content_area_width < slide_width_in - 2 * internal_margin:
+        slide_margin = (slide_width_in - content_area_width) / 2
 
     max_width = slide_width_in - 2 * slide_margin
 
@@ -1597,12 +2003,12 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             for child in elem.get('children', []):
                 child['bounds']['y'] = current_y + child['bounds']['y']
                 # Don't adjust x - build_grid_children already positioned correctly
-            current_y += b['height'] + 0.15
+            current_y += b['height'] + 0.13
             continue
 
         # Skip elements already positioned by grid/flex layout, but advance y
         if elem.get('layoutDone'):
-            current_y = max(current_y, b['y'] + b['height'] + 0.15)
+            current_y = max(current_y, b['y'] + b['height'] + 0.13)
             continue
 
         # Skip elements marked for post-layout positioning (e.g., pill shapes/text)
@@ -1623,7 +2029,11 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 if font_size_px <= 0:
                     font_size_px = 16.0
                 font_size_pt = font_size_px / PX_PER_IN * 72.0
-                line_count = estimate_wrapped_lines(text, font_size_pt, max_width) if text else 1
+                # Use element's own width (from build_text_element) for line wrapping
+                # (max_width is the full slide content width, but the element may
+                # have a narrower maxWidth constraint)
+                wrap_width = b['width']
+                line_count = estimate_wrapped_lines(text, font_size_pt, wrap_width) if text else 1
                 # Use CSS lineHeight if available
                 lh = s.get('lineHeight', '')
                 if lh and 'px' in lh:
@@ -1632,7 +2042,12 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                     line_height_px = font_size_px * float(lh)
                 else:
                     line_height_px = font_size_px * 1.0
-                b['height'] = max(line_count * line_height_px / PX_PER_IN, font_size_pt / 72.0 * 1.5)
+                # For large display fonts (>= 48pt), use line-height-based height directly
+                # (PPTX renders large text with minimal leading, matching CSS line-height)
+                if font_size_pt >= 48:
+                    b['height'] = line_count * line_height_px / PX_PER_IN
+                else:
+                    b['height'] = max(line_count * line_height_px / PX_PER_IN, font_size_pt / 72.0 * 1.0)
                 # Update naturalHeight to match layout-calculated height
                 # (export_text_element uses max of bounds height and naturalHeight)
                 elem['naturalHeight'] = b['height']
@@ -1654,23 +2069,63 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             effective_w = parse_px(s.get('width', '')) if parse_px(s.get('width', '')) > 0 else (parse_px(s.get('maxWidth', '')) if is_inline_block and parse_px(s.get('maxWidth', '')) > 0 else 0)
             has_explicit_width = effective_w > 0 and effective_w < max_width * PX_PER_IN
 
-            # Inline-block elements: keep pre-computed content width, center via x position
+            # Inline-block elements: keep pre-computed content width, left-align
             if is_inline_block and b['width'] < max_width * 0.8:
                 # Trust the pre-computed width from build_text_element (max-line-width)
                 # Don't overwrite with effective_w which is just maxWidth constraint
-                b['x'] = slide_margin + (max_width - b['width']) / 2
+                b['x'] = slide_margin  # left-align within content area
             elif text_align == 'center' and text:
-                cjk_count = sum(1 for c in text if ord(c) > 127)
-                latin_count = len(text) - cjk_count
-                text_width_in = (cjk_count * font_size_px + latin_count * font_size_px * 0.55) / PX_PER_IN
+                # For multiline centered text, use the widest line's width
+                # (golden centers each line independently, element sized to widest)
+                max_line_width_px = 0.0
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    line_cjk = sum(1 for c in line if ord(c) > 127)
+                    line_latin = len(line) - line_cjk
+                    line_w = line_cjk * font_size_px * 0.96 + line_latin * font_size_px * 0.55
+                    if line_w > max_line_width_px:
+                        max_line_width_px = line_w
+                text_width_in = max_line_width_px / PX_PER_IN
                 if elem.get('_full_subtitle'):
                     # Full subtitle spans the full slide content width (like golden)
                     content_width = max_width
                 elif elem.get('tag', '') in ('h1', 'h2'):
-                    # Use full content width for headings (golden uses full width)
-                    content_width = max_width
+                    # For center-aligned headings, use CJK-only width
+                    # (golden sizes headings to CJK character width, latin chars
+                    # fit within due to narrower rendering)
+                    total_cjk = sum(1 for c in text if ord(c) > 127)
+                    if total_cjk > 0:
+                        # For all-CJK or mostly-CJK headings, use 1.0x multiplier
+                        # to match golden's heading width
+                        cjk_width_px = total_cjk * font_size_px
+                        content_width = min(cjk_width_px / PX_PER_IN, max_width)
+                    else:
+                        content_width = min(text_width_in, max_width)
                 else:
-                    content_width = min(text_width_in * 1.3 + 1.0, max_width)
+                    # For centered text: check if element has maxWidth and wrapped text.
+                    # If so, use the full unwrapped text width (golden wraps text but
+                    # keeps the element at full content width).
+                    mw_px = parse_px(s.get('maxWidth', ''))
+                    if mw_px > 0 and '\n' in text:
+                        # Wrapped text with maxWidth: compute full unwrapped width
+                        full_text = text.replace('\n', '')
+                        full_cjk = sum(1 for c in full_text if ord(c) > 127)
+                        full_latin = len(full_text) - full_cjk
+                        full_px = full_cjk * font_size_px * 0.96 + full_latin * font_size_px * 0.55
+                        content_width = min(full_px / PX_PER_IN, max_width)
+                    elif text_width_in > 1.0:
+                        # For center-aligned text inside a container with maxWidth,
+                        # if the text is significantly narrower than max_width,
+                        # the golden treats it as block-level filling the container
+                        mw_px = parse_px(s.get('maxWidth', ''))
+                        if text_align == 'center' and mw_px > 0 and text_width_in < max_width * 0.7:
+                            content_width = max_width
+                        else:
+                            content_width = min(text_width_in, max_width)
+                    else:
+                        content_width = min(text_width_in * 1.3 + 1.0, max_width)
                 b['width'] = content_width
                 b['x'] = slide_margin + (max_width - content_width) / 2
             elif effective_w > 0 and effective_w < max_width * PX_PER_IN:
@@ -1722,7 +2177,16 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                     # No matching text found — use full width
                     b['width'] = max_width
                     b['x'] = slide_margin
-            # else: keep pre-computed width (already set by build_shape_element)
+            # else: keep pre-computed width but center on slide
+            elif text_align == 'center' and b['width'] > 0 and b['width'] < max_width:
+                b['x'] = slide_margin + (max_width - b['width']) / 2
+            # Small shapes (dividers, decorative elements) without explicit positioning:
+            # left-align within content area (like other block elements)
+            elif b['width'] < max_width * 0.5:
+                b['x'] = slide_margin
+            # Also center small shapes with auto margins (like dividers)
+            elif s.get('marginLeft', '') == 'auto' and s.get('marginRight', '') == 'auto':
+                b['x'] = slide_margin + (max_width - b['width']) / 2
         elif elem_type == 'table':
             b['width'] = max_width
             b['x'] = slide_margin
@@ -1736,7 +2200,23 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
 
         # Paired shapes don't advance current_y — the paired text element positions both
         if id(elem) not in paired_shapes:
-            current_y += b['height'] + 0.15
+            # Skip advancing current_y for full-slide background shapes —
+            # they span the entire slide and shouldn't affect content flow
+            if (elem_type == 'shape' and b['width'] > slide_width_in - 1.0
+                    and b['height'] > slide_height_in - 1.0):
+                continue
+            # Apply marginBottom to adjust spacing to next element
+            # Golden analysis: marginBottom REPLACES the base gap (0.13"), not adds to it.
+            # The browser's layout already includes margins in the visual spacing.
+            # When marginBottom is set, use it as the gap. When not set, use base gap.
+            mb_raw = s.get('marginBottom', '')
+            mb = parse_px(mb_raw) / PX_PER_IN
+            if mb > 0:
+                current_y += b['height'] + mb  # marginBottom replaces base gap
+            elif mb < 0:
+                current_y += b['height'] + mb  # negative margin (tighter spacing)
+            else:
+                current_y += b['height'] + 0.13  # default base gap
 
     # Post-layout sync: for shapes paired with text, copy text position to shape
     text_by_pair: Dict[str, Dict] = {}
@@ -1765,19 +2245,47 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             # Calculate content height EXCLUDING _skip_layout elements (pills, subtitle)
             # These are positioned absolutely and shouldn't affect centering
             non_skip_y_max = 0.0
+            # Compute slide content width for detecting full-width bg shapes
+            max_width = 0.0
+            for elem in elements:
+                if not elem.get('_skip_layout'):
+                    mw = elem.get('styles', {}).get('maxWidth')
+                    if mw and mw != 'none':
+                        try:
+                            max_width = float(mw) / 108.0
+                        except (ValueError, TypeError):
+                            pass
+                    if max_width <= 0:
+                        max_width = slide_width_in - 2 * 0.5  # fallback: slide width minus margins
+            # Also consider container children's positions for full-width detection
+            for elem in elements:
+                if elem.get('type') == 'container' and elem.get('children'):
+                    for child in elem.get('children', []):
+                        cb = child['bounds']
+                        if cb['width'] > max_width:
+                            max_width = cb['width']
+
             for elem in elements:
                 if elem.get('_skip_layout'):
                     continue
                 b = elem['bounds']
-                elem_bottom = b['y'] + b['height']
-                if elem_bottom > non_skip_y_max:
-                    non_skip_y_max = elem_bottom
-                if elem.get('type') == 'container':
+                # Skip full-width background shapes from content height calculation
+                # These are wrapper/overlay shapes that span the content area and
+                # shouldn't inflate the y_offset for text centering
+                # But only skip shapes that are truly full-width (>= 95% of slide width)
+                if elem.get('type') == 'shape' and b['width'] > slide_width_in * 0.95:
+                    continue
+                if elem.get('type') == 'container' and elem.get('children'):
+                    # For containers, use children's actual extent, not container bounds
                     for child in elem.get('children', []):
                         cb = child['bounds']
                         child_bottom = cb['y'] + cb['height']
                         if child_bottom > non_skip_y_max:
                             non_skip_y_max = child_bottom
+                else:
+                    elem_bottom = b['y'] + b['height']
+                    if elem_bottom > non_skip_y_max:
+                        non_skip_y_max = elem_bottom
             total_content_h = non_skip_y_max - internal_margin
             available_h = slide_height_in - 2 * internal_margin
             if total_content_h < available_h:
@@ -1803,13 +2311,15 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             all_pills.append(elem)
 
     if all_pills:
-        # Find the lowest y position among all non-pill content (including container children like stat items).
-        # This gives us the bottom of stat items after vertical centering.
+        # Find the FIRST non-pill content element's y position (pills are headers, placed above title)
+        first_content_y = slide_height_in  # start with max possible
         lowest_y = 0.0
         for elem in elements:
             if elem.get('_skip_layout') or elem.get('_is_pill'):
                 continue
             b = elem['bounds']
+            if b['y'] < first_content_y:
+                first_content_y = b['y']
             elem_bottom = b['y'] + b['height']
             if elem_bottom > lowest_y:
                 lowest_y = elem_bottom
@@ -1817,12 +2327,15 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             if elem.get('type') == 'container':
                 for child in elem.get('children', []):
                     cb = child['bounds']
+                    if cb['y'] < first_content_y:
+                        first_content_y = cb['y']
                     child_bottom = cb['y'] + cb['height']
                     if child_bottom > lowest_y:
                         lowest_y = child_bottom
 
-        # Place pills 0.08" below the lowest content element (tight gap, matching golden spacing)
-        pill_y = lowest_y + 0.08
+        # Place pills ABOVE the first content element with a small gap
+        pill_h = all_pills[0]['bounds']['height']
+        pill_y = first_content_y - pill_h - 0.16
 
         # Cap to not go too close to nav dots (y=7.22)
         pill_y = min(pill_y, slide_height_in - 0.60)
@@ -1833,6 +2346,16 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
         for p in all_pills:
             p['bounds']['x'] = row_x
             p['bounds']['y'] = pill_y
+            # Also position paired text element (if any)
+            pair_id = p.get('_pair_with', '')
+            if pair_id:
+                for elem in elements:
+                    if elem.get('_pair_with') == pair_id and elem.get('type') == 'text':
+                        elem['bounds']['x'] = row_x
+                        elem['bounds']['y'] = pill_y
+                        elem['bounds']['width'] = p['bounds']['width']
+                        elem['bounds']['height'] = p['bounds']['height']
+                        break
             row_x += p['bounds']['width'] + PILLS_GAP
 
 
@@ -2104,17 +2627,22 @@ def gradient_to_solid(bg_image, slide_bg=(255, 255, 255)):
     if not bg_image or 'gradient' not in bg_image:
         return None
     rgba_matches = re.findall(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', bg_image)
-    if not rgba_matches:
-        return None
-    r, g, b = int(rgba_matches[0][0]), int(rgba_matches[0][1]), int(rgba_matches[0][2])
-    a = float(rgba_matches[0][3]) if rgba_matches[0][3] else 1.0
-    if a <= 0:
-        return None
-    if a < 1.0:
-        r = int(a * r + (1 - a) * slide_bg[0])
-        g = int(a * g + (1 - a) * slide_bg[1])
-        b = int(a * b + (1 - a) * slide_bg[2])
-    return (r, g, b)
+    if rgba_matches:
+        r, g, b = int(rgba_matches[0][0]), int(rgba_matches[0][1]), int(rgba_matches[0][2])
+        a = float(rgba_matches[0][3]) if rgba_matches[0][3] else 1.0
+        if a <= 0:
+            return None
+        if a < 1.0:
+            r = int(a * r + (1 - a) * slide_bg[0])
+            g = int(a * g + (1 - a) * slide_bg[1])
+            b = int(a * b + (1 - a) * slide_bg[2])
+        return (r, g, b)
+    # Fallback: try hex colors in gradient (e.g. linear-gradient(90deg, #2563eb, #0ea5e9))
+    hex_matches = re.findall(r'#([0-9a-fA-F]{6})', bg_image)
+    if hex_matches:
+        h = hex_matches[0]
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    return None
 
 
 def interpolate_color(c1, c2, t):
@@ -2319,10 +2847,9 @@ def export_text_element(slide, elem, bg_color=None):
     letter_spacing = s.get('letterSpacing', '')
 
     natural_h = elem.get('naturalHeight', b['height'])
-    # Use a generous height: take the max of estimated height and a minimum based on font size
-    # PPTX CJK rendering needs more vertical space than browser estimate
-    min_h_by_font = font_size_pt / 72.0 * 1.5  # at least 1.5x font size
-    effective_h = max(b['height'], natural_h, min_h_by_font)
+    # Use the max of bounds height and naturalHeight (both computed from CSS)
+    # Don't add extra minimum — PPTX renders text at CSS-specified line-height
+    effective_h = max(b['height'], natural_h)
 
     if not segments:
         raw = (elem.get('text', '') or '').strip()
@@ -2736,7 +3263,7 @@ def extract_css_from_soup(soup: BeautifulSoup) -> List[CSSRule]:
 
 # ─── Main Export Pipeline ─────────────────────────────────────────────────────
 
-def export_sandbox(html_path, output_path=None, width=1440, height=810):
+def export_sandbox(html_path, output_path=None, width=1440, height=900):
     html_path = Path(html_path).resolve()
     if not html_path.exists():
         print(f"Error: {html_path}")
@@ -2756,12 +3283,13 @@ def export_sandbox(html_path, output_path=None, width=1440, height=810):
     # Create PPTX
     prs = Presentation()
     prs.slide_width = Inches(13.33)
-    prs.slide_height = Inches(7.5)  # 16:9
+    prs.slide_height = Inches(8.33)  # 16:10 (matches golden)
     blank_layout = prs.slide_layouts[6]
     slide_w_in = 13.33
-    slide_h_in = 7.5
+    slide_h_in = 8.33
 
     for i, slide_data in enumerate(slides):
+        slide_data['_slide_index'] = i
         pptx_slide = prs.slides.add_slide(blank_layout)
 
         # Background
@@ -2799,7 +3327,8 @@ def export_sandbox(html_path, output_path=None, width=1440, height=810):
         slide_element_style = slide_data.get('slideStyle', {})
 
         # Layout elements
-        layout_slide_elements(elements, slide_w_in, slide_h_in, slide_element_style)
+        slide_data['_slide_index'] = i
+        layout_slide_elements(elements, slide_w_in, slide_h_in, slide_element_style, slide_data)
 
         # Clamp widths
         for elem in elements:
@@ -2809,6 +3338,13 @@ def export_sandbox(html_path, output_path=None, width=1440, height=810):
                         child['bounds']['width'] = slide_w_in - child['bounds']['x']
             elif elem['bounds']['x'] < slide_w_in and elem['bounds']['width'] > slide_w_in - elem['bounds']['x']:
                 elem['bounds']['width'] = slide_w_in - elem['bounds']['x']
+
+        # Determine alpha compositing background: solid color, or first gradient stop
+        _slide_bg = slide_data['background']
+        if _slide_bg is None and slide_data.get('bgGradient'):
+            _slide_bg = slide_data['bgGradient'][0]  # use first gradient stop
+        if _slide_bg is None:
+            _slide_bg = (255, 255, 255)
 
         # Render elements
         for elem in elements:
@@ -2821,7 +3357,7 @@ def export_sandbox(html_path, output_path=None, width=1440, height=810):
                         cb = child['bounds']
                         if child_type == 'shape':
                             export_shape_background(pptx_slide, child,
-                                                    slide_bg=slide_data['background'] or (255, 255, 255))
+                                                    slide_bg=_slide_bg)
                         elif child_type == 'image':
                             export_image_element(pptx_slide, child, html_dir)
                         elif child_type == 'table':
@@ -2831,7 +3367,7 @@ def export_sandbox(html_path, output_path=None, width=1440, height=810):
                     continue
                 elif elem_type == 'shape':
                     export_shape_background(pptx_slide, elem,
-                                            slide_bg=slide_data['background'] or (255, 255, 255))
+                                            slide_bg=_slide_bg)
                 elif elem_type == 'image':
                     export_image_element(pptx_slide, elem, html_dir)
                 elif elem_type == 'table':
@@ -2865,7 +3401,7 @@ def main():
     parser.add_argument("html", help="Path to HTML file")
     parser.add_argument("output", nargs="?", help="Output .pptx path (default: same name as HTML)")
     parser.add_argument("--width", type=int, default=1440, help="Slide width in pixels (default: 1440)")
-    parser.add_argument("--height", type=int, default=810, help="Slide height in pixels (default: 810)")
+    parser.add_argument("--height", type=int, default=900, help="Slide height in pixels (default: 900)")
     parser.add_argument("--no-chrome", action="store_true", help="Skip page counter and nav dots")
     args = parser.parse_args()
 
