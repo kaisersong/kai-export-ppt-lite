@@ -923,7 +923,14 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     if width_in is None:
         # For inline/inline-block elements, use content width; for block, use full width
         if is_inline_block or content_w_in < default_w_in * 0.5:
-            width_in = min(content_w_in + 0.08, default_w_in)  # content + tight padding for capsule fit
+            if is_inline_block:
+                # Inline-block: include CSS horizontal padding in width (pills, badges)
+                pad_l = parse_px(style.get('paddingLeft', ''))
+                pad_r = parse_px(style.get('paddingRight', ''))
+                h_pad_in = (pad_l + pad_r) / PX_PER_IN
+            else:
+                h_pad_in = 0.08
+            width_in = min(content_w_in + h_pad_in, default_w_in)
         else:
             width_in = default_w_in
 
@@ -1293,13 +1300,10 @@ def flat_extract(
                     if has_visible_bg_or_border(style):
                         shape = build_shape_element(element, style, slide_width_px)
                         shape['bounds'] = dict(text_el['bounds'])
-                        # Add padding to shape dimensions
-                        pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
-                        pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+                        # text_el width already includes CSS padding from build_text_element
+                        # Add extra border/padding for shape if needed (border width)
                         pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
                         pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
-                        if pad_l + pad_r > 0:
-                            shape['bounds']['width'] = text_el['bounds']['width'] + pad_l + pad_r
                         if pad_t + pad_b > 0:
                             shape['bounds']['height'] = text_el['bounds']['height'] + pad_t + pad_b
                         # Pair shape with text for position syncing after layout
@@ -1664,8 +1668,15 @@ def build_grid_children(
         else:
             this_item_width = item_width_in
 
+        # Detect bg shape early (needed for height calculation)
+        bg_shape_elem = None
+        for e in group:
+            if (e.get('type') == 'shape' and not e.get('text')
+                    and e['bounds'].get('height', 0) >= 1.0):
+                bg_shape_elem = e
+                break
+
         # Estimate item height from its elements' existing bounds
-        # Use the sum of text element heights (already computed by build_text_element)
         text_h_total = 0.0
         has_text = False
         for elem in group:
@@ -1678,20 +1689,14 @@ def build_grid_children(
 
         if has_text:
             text_count = sum(1 for e in group if e.get('type') == 'text')
-            # Check if this group has a background shape (card-style item)
-            grp_has_bg = any(
-                e.get('type') == 'shape' and not e.get('text') and e['bounds'].get('height', 0) >= 1.0
-                for e in group
-            )
-            if grp_has_bg:
-                # Card: add padding + internal gaps
-                # Golden stat cards: ~15px top/bottom padding, ~2px internal gap
-                card_pad_t = 15.0 / PX_PER_IN
-                card_pad_b = 15.0 / PX_PER_IN
-                internal_gap = 0.02 * max(text_count - 1, 0)
+            if bg_shape_elem:
+                # Card: use CSS padding from bg shape
+                card_pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+                card_pad_b = bg_shape_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
+                # Internal gap matches the actual layout gap (0.05" between elements)
+                internal_gap = 0.05 * max(text_count - 1, 0)
                 item_h = text_h_total + card_pad_t + card_pad_b + internal_gap
             else:
-                # No background (stat items, etc.): minimal gap between text elements
                 internal_gap = 0.05 * max(text_count - 1, 0)
                 item_h = text_h_total + internal_gap
         else:
@@ -1700,13 +1705,6 @@ def build_grid_children(
         item_y = row_idx * (item_h + gap_in)  # Container-relative (layout pass adds container y)
 
         # Layout elements: background shapes overlap content, content stacks vertically
-        # Detect if this group has a background shape (card-style item)
-        bg_shape_elem = None
-        for e in group:
-            if (e.get('type') == 'shape' and not e.get('text')
-                    and e['bounds'].get('height', 0) >= 1.0):
-                bg_shape_elem = e
-                break
         has_bg_shape = bg_shape_elem is not None
         # Use CSS padding from bg shape if available, otherwise defaults
         if has_bg_shape:
