@@ -1790,6 +1790,7 @@ def build_grid_children(
                 b['y'] = group_y
                 # Paired shapes (pill/badge backgrounds) and decorations overlay text — don't advance Y
                 if elem.get('type') == 'shape' and (elem.get('_pair_with') or elem.get('_is_decoration')):
+                    results.append(elem)
                     continue
                 # For text elements, decide whether to use constrained width or shrink-wrap
                 if elem.get('type') == 'text':
@@ -1799,7 +1800,10 @@ def build_grid_children(
                     css_text_align = bg_shape_elem.get('_css_text_align', 'left') if bg_shape_elem else 'left'
                     tag = elem.get('tag', '')
                     is_block_text = tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li')
-                    if is_block_text and orig_w > 0.5:
+                    # Paired text (pill/badge): stretch to card content width (CSS flex-column stretch)
+                    if elem.get('_pair_with') and bg_shape_elem and orig_w > 0:
+                        b['width'] = card_content_w - border_l
+                    elif is_block_text and orig_w > 0.5:
                         # Block text inside card: use full content width
                         b['width'] = card_content_w - border_l
                         if css_text_align == 'center':
@@ -2313,8 +2317,8 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
         if id(elem) not in paired_shapes:
             # Skip advancing current_y for full-slide background shapes —
             # they span the entire slide and shouldn't affect content flow
-            if (elem_type == 'shape' and b['width'] > slide_width_in - 1.0
-                    and b['height'] > slide_height_in - 1.0):
+            if (elem_type == 'shape' and b['width'] > slide_width_in * 0.9
+                    and b['height'] > slide_height_in * 0.9):
                 continue
             # Apply marginBottom to adjust spacing to next element
             # Golden analysis: marginBottom REPLACES the base gap (0.13"), not adds to it.

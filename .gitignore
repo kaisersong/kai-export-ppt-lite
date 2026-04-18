@@ -8,3 +8,4 @@ __pycache__/
 demo/
 dump_compare.py
 scripts/_debug*.py
+.gstack/
