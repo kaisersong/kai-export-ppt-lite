@@ -285,6 +285,10 @@ def _expand_background_shorthand_inplace(computed: Dict[str, str]) -> None:
         expanded = _expand_background_shorthand(bg)
         for key, val in expanded.items():
             computed.setdefault(key, val)
+    elif bg not in ('transparent', 'rgba(0, 0, 0, 0)', 'none', ''):
+        # Solid color background shorthand (e.g., background:rgba(15,23,42,0.08))
+        # → set backgroundColor so downstream checks detect it
+        computed.setdefault('backgroundColor', bg)
 
 
 def resolve_css_variables_inline(css_value: str) -> str:
@@ -1349,12 +1353,31 @@ def flat_extract(
                 return results
             return []
 
+        child_tags = [c for c in element.children if isinstance(c, Tag)]
+
+        # No-text elements with explicit CSS dimensions and visible bg → decoration shapes
+        # (e.g., colored dot divs with width/height/border-radius)
+        if not total_text and not child_tags and has_visible_bg_or_border(style):
+            css_w = parse_px(style.get('width', ''))
+            css_h = parse_px(style.get('height', ''))
+            if css_w > 0 and css_h > 0:
+                dec_w = css_w / PX_PER_IN
+                dec_h = css_h / PX_PER_IN
+                return [{
+                    'type': 'shape', 'tag': element.name,
+                    'bounds': {'x': 0.5, 'y': 0.5, 'width': dec_w, 'height': dec_h},
+                    'styles': {
+                        'backgroundColor': style.get('backgroundColor', ''),
+                        'borderRadius': style.get('borderRadius', ''),
+                    },
+                    '_is_decoration': True,
+                }]
+
         # Standard container: recurse into children
         # First check: if ALL child Tags are inline elements (strong, em, code, etc.)
         # and the container has visible bg/border with text content, treat it as a
         # leaf text element — the inline elements are just styled text within one shape.
         # This handles cases like .info divs with <strong> and <code> children.
-        child_tags = [c for c in element.children if isinstance(c, Tag)]
         all_inline = bool(child_tags) and all(c.name.lower() in INLINE_TAGS for c in child_tags)
         if all_inline and total_text and has_visible_bg_or_border(style):
             text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
@@ -1599,7 +1622,9 @@ def build_grid_children(
                 shape['_css_border_l'] = parse_px(child_style.get('borderLeftWidth', child_style.get('borderLeft', '0px').split()[0] if child_style.get('borderLeft', '') else '0px')) / PX_PER_IN
                 shape['_css_text_align'] = child_style.get('textAlign', 'left')
                 # Filter out shape elements from children that only exist because of inherited bg
-                content_only = [e for e in sub_elements if e.get('type') != 'shape' or e.get('text')]
+                # Keep paired shapes (pill/badge backgrounds) and shapes with text
+                content_only = [e for e in sub_elements
+                                if e.get('type') != 'shape' or e.get('text') or e.get('_pair_with')]
                 sub_elements = [shape] + content_only
             child_groups.append(sub_elements)
             # Compute item width from text content, not element bounds
@@ -1763,6 +1788,9 @@ def build_grid_children(
             if elem.get('type') in ('text', 'shape'):
                 b['x'] = item_x + pad_x + border_l
                 b['y'] = group_y
+                # Paired shapes (pill/badge backgrounds) and decorations overlay text — don't advance Y
+                if elem.get('type') == 'shape' and (elem.get('_pair_with') or elem.get('_is_decoration')):
+                    continue
                 # For text elements, decide whether to use constrained width or shrink-wrap
                 if elem.get('type') == 'text':
                     orig_w = b.get('width', 0)
@@ -1817,6 +1845,25 @@ def build_grid_children(
                 b['y'] = group_y
                 b['width'] = item_width_in
                 group_y += b['height'] + 0.05
+            elif elem.get('type') == 'container':
+                # Unwrap nested container (e.g., flex-row header with dot+text+text)
+                inner_children = elem.get('children', [])
+                inner_x = item_x + pad_x + border_l
+                for ic in inner_children:
+                    icb = ic.get('bounds', {})
+                    # Skip full-width bg shapes from inner grid layout
+                    if (ic.get('type') == 'shape' and not ic.get('text')
+                            and icb.get('height', 0) >= 1.0):
+                        continue
+                    icb['x'] = inner_x
+                    icb['y'] = group_y
+                    ic['layoutDone'] = True
+                    results.append(ic)
+                    inner_x += icb.get('width', 0) + 0.05
+                group_y += max((ic.get('bounds', {}).get('height', 0.2) for ic in inner_children
+                                if not (ic.get('type') == 'shape' and ic.get('bounds', {}).get('height', 0) >= 1.0)),
+                               default=0.2) + 0.05
+                continue  # Don't append the container wrapper itself
             results.append(elem)
 
     # Mark all grid children so pill positioning can skip them
