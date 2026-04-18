@@ -936,6 +936,18 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
 
     line_count = estimate_wrapped_lines(text, font_size_pt, width_in)
 
+    # Tolerate minor width overflow (up to 5%) for short text without explicit
+    # newlines — px_to_pt 96 DPI → 108 PPI slide scale can cause false wraps
+    # for CJK text (e.g., "核心 8 项" at 24px → 18pt).
+    if (line_count > 1 and '\n' not in text and len(text.strip()) <= 20
+            and font_size_pt >= 16):
+        cjk_count = sum(1 for c in text if ord(c) > 127)
+        latin_count = len(text) - cjk_count
+        text_width_in = (cjk_count * font_size_pt + latin_count * font_size_pt * 0.55) / 72.0
+        overflow = (text_width_in - width_in) / width_in
+        if 0 < overflow < 0.08:
+            line_count = 1
+
     # Compute line height multiplier from CSS
     lh = style.get('lineHeight', '')
     if lh and 'px' in lh:
@@ -1065,7 +1077,7 @@ def build_table_element(element: Tag, css_rules: List[CSSRule], style: Dict[str,
             rows.append({'isHeader': is_header, 'cells': cells})
     return {
         'type': 'table',
-        'bounds': {'x': 0.5, 'y': 1.0, 'width': 12.33, 'height': max(len(rows) * 0.5, 1.0)},
+        'bounds': {'x': 0.5, 'y': 1.0, 'width': 12.33, 'height': max(len(rows) * 0.264, 1.0)},
         'rows': rows,
     }
 
@@ -1684,7 +1696,8 @@ def build_grid_children(
                 text_h_total += elem['bounds'].get('height', 0.3)
                 has_text = True
             elif elem.get('type') == 'table':
-                text_h_total += len(elem.get('rows', [])) * 0.5
+                # Table rows are rendered at ~0.264" each (matching golden)
+                text_h_total += len(elem.get('rows', [])) * 0.264
                 has_text = True
 
         if has_text:
@@ -1693,14 +1706,24 @@ def build_grid_children(
                 # Card: use CSS padding from bg shape
                 card_pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
                 card_pad_b = bg_shape_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
-                # Internal gap: use CSS gap for li elements, default 0.05" for others
+                # Internal gap: compute from actual marginBottom of text elements
+                # rather than hardcoded defaults
                 li_count = sum(1 for e in group if e.get('tag') == 'li')
                 non_li_count = text_count - li_count
                 li_gap = 7.0 / PX_PER_IN  # ul.bl gap: 7px
+                # Sum marginBottom from text elements (h3 margin-bottom: 10px etc.)
+                total_text_margin = 0.0
+                for elem in group:
+                    if elem.get('type') == 'text':
+                        mb = elem.get('styles', {}).get('marginBottom', '')
+                        mb_px = parse_px(mb) if mb else 0
+                        total_text_margin += mb_px / PX_PER_IN
+                # Use the larger of CSS gap-based or margin-based spacing
                 other_gap = 0.05
-                internal_gap = (li_gap * max(li_count - 1, 0) +
+                gap_from_css = (li_gap * max(li_count - 1, 0) +
                                 other_gap * max(non_li_count, 0) +
                                 other_gap * min(li_count, 1) * min(non_li_count, 1))
+                internal_gap = max(gap_from_css, total_text_margin)
                 item_h = text_h_total + card_pad_t + card_pad_b + internal_gap
             else:
                 internal_gap = 0.05 * max(text_count - 1, 0)
@@ -1785,9 +1808,9 @@ def build_grid_children(
                 else:
                     group_y += b['height'] + 0.05
             elif elem.get('type') == 'table':
-                b['x'] = item_x
+                b['x'] = item_x + pad_x + border_l
                 b['y'] = group_y
-                b['width'] = this_item_width
+                b['width'] = this_item_width - 2 * pad_x if has_bg_shape else this_item_width
                 group_y += b['height'] + 0.05
             elif elem.get('type') == 'image':
                 b['x'] = item_x
@@ -2089,10 +2112,12 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 elem['naturalHeight'] = b['height']
 
             # Add CSS vertical padding to height
-            pad_t = parse_px(s.get('paddingTop', ''))
-            pad_b = parse_px(s.get('paddingBottom', ''))
-            if pad_t + pad_b > 0:
-                b['height'] += (pad_t + pad_b) / PX_PER_IN
+            # Skip if pre-pass already corrected the height (includes padding adjustment)
+            if not elem.get('pptx_height_corrected'):
+                pad_t = parse_px(s.get('paddingTop', ''))
+                pad_b = parse_px(s.get('paddingBottom', ''))
+                if pad_t + pad_b > 0:
+                    b['height'] += (pad_t + pad_b) / PX_PER_IN
 
             # For list items, ensure minimum height matches rendered browser output
             # (golden shows ~0.76" for 18px list items with padding)
@@ -2105,8 +2130,11 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             effective_w = parse_px(s.get('width', '')) if parse_px(s.get('width', '')) > 0 else (parse_px(s.get('maxWidth', '')) if is_inline_block and parse_px(s.get('maxWidth', '')) > 0 else 0)
             has_explicit_width = effective_w > 0 and effective_w < max_width * PX_PER_IN
 
-            # Inline-block elements: keep pre-computed content width, left-align
-            if is_inline_block and b['width'] < max_width * 0.8:
+            # Inline-block elements: check textAlign first
+            if is_inline_block and text_align == 'center' and b['width'] < max_width * 0.8:
+                # Centered inline-block: center within content area
+                b['x'] = slide_margin + (max_width - b['width']) / 2
+            elif is_inline_block and b['width'] < max_width * 0.8:
                 # Trust the pre-computed width from build_text_element (max-line-width)
                 # Don't overwrite with effective_w which is just maxWidth constraint
                 b['x'] = slide_margin  # left-align within content area
@@ -2227,7 +2255,7 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             b['width'] = max_width
             b['x'] = slide_margin
             rows = elem.get('rows', [])
-            b['height'] = max(len(rows) * 0.5, 0.5)
+            b['height'] = max(len(rows) * 0.264, 0.5)
         elif elem_type == 'image':
             if b['width'] > max_width:
                 b['width'] = max_width
@@ -2422,8 +2450,18 @@ def pre_pass_corrections(elements: List[Dict]):
             nat = t.get('naturalHeight', t['bounds']['height'])
             base = max(nat, s['bounds']['height'])
             t_font_pt = px_to_pt(t['styles'].get('fontSize', '16px'))
-            t_line_h = t_font_pt / 72.0 * 1.2
-            t_est_lines = base / max(t_line_h, 0.001)
+            # Use CSS line-height if available, otherwise default 1.2
+            t_lh = t['styles'].get('lineHeight', '')
+            if t_lh and t_lh.replace('.', '').isdigit():
+                t_line_multiplier = float(t_lh)
+            else:
+                t_line_multiplier = 1.2
+            t_line_h = t_font_pt / 72.0 * t_line_multiplier
+            # Subtract padding from base height for more accurate line estimation
+            t_pad_t = parse_px(t['styles'].get('paddingTop', '0px')) / PX_PER_IN
+            t_pad_b = parse_px(t['styles'].get('paddingBottom', '0px')) / PX_PER_IN
+            t_text_h = base - t_pad_t - t_pad_b
+            t_est_lines = t_text_h / max(t_line_h, 0.001) if t_text_h > 0 else 1
             if t_est_lines >= 2.0:
                 corrected = base * PPTX_HEIGHT_FACTOR
                 s['bounds']['height'] = corrected
