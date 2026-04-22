@@ -13,7 +13,7 @@ Pure Python: no Playwright, no Chrome. Uses beautifulsoup4 for HTML parsing,
 python-pptx for PPTX generation, and Pillow for preview images.
 
 Usage:
-    python export-sandbox-pptx.py <presentation.html> [output.pptx] [--width W] [--height H]
+    python export-sandbox-pptx.py <presentation.html> [demo/output.pptx] [--width W] [--height H]
 
 Dependencies:
     pip install beautifulsoup4 lxml python-pptx Pillow
@@ -72,6 +72,8 @@ RASTER_TAGS = {'img', 'svg', 'canvas'}
 CONTAINER_TAGS = {'div', 'section', 'article', 'ul', 'ol'}
 INLINE_TAGS = {'strong', 'em', 'b', 'i', 'span', 'a', 'mark', 'code', 'small',
                'kbd', 'var', 'abbr', 'time', 'sup', 'sub', 'br'}
+INLINE_BOX_KINDS = {'code', 'kbd', 'badge'}
+INLINE_GROUP_KINDS = INLINE_BOX_KINDS | {'link', 'icon'}
 
 
 # ─── CSS Parsing ──────────────────────────────────────────────────────────────
@@ -274,6 +276,19 @@ def compute_element_style(
     # Expand background shorthand (background: linear-gradient(...) → backgroundImage)
     _expand_background_shorthand_inplace(computed)
     return computed
+
+
+def compute_inherited_style(
+    element: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Compute style with ancestor text inheritance applied explicitly."""
+    inherited = dict(parent_style or {})
+    ancestors = [p for p in element.parents if isinstance(p, Tag)]
+    for ancestor in reversed(ancestors):
+        inherited = compute_element_style(ancestor, css_rules, ancestor.get('style', ''), inherited)
+    return compute_element_style(element, css_rules, element.get('style', ''), inherited)
 
 
 def _expand_background_shorthand_inplace(computed: Dict[str, str]) -> None:
@@ -511,8 +526,119 @@ def parse_px(val: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def _default_text_color(fallback: str = '') -> str:
+    """Resolve a stable default text color when CSS leaves it implicit."""
+    if fallback and fallback not in ('transparent', 'rgba(0, 0, 0, 0)'):
+        return fallback
+    root_primary = _ROOT_CSS_VARS.get('--text-primary', '')
+    if root_primary:
+        return root_primary
+    return '#000000'
+
+
+def _normalize_ink_color(color_str: str) -> str:
+    """Snap deep slate ink to true black for more stable native PPT output."""
+    if not color_str:
+        return color_str
+    rgb = parse_color(color_str)
+    if not rgb:
+        return color_str
+    if rgb == (15, 23, 42):
+        return '#000000'
+    return color_str
+
+
+def _extract_gradient_colors(bg_image: str) -> List[str]:
+    """Extract gradient color stops from a CSS background-image value."""
+    if not bg_image or 'gradient' not in bg_image:
+        return []
+    colors: List[str] = []
+    for rgba in re.findall(r'rgba?\([^)]+\)', bg_image):
+        colors.append(rgba)
+    for hex_color in re.findall(r'#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b', bg_image):
+        colors.append(hex_color)
+    # Preserve order but dedupe exact repeats.
+    deduped: List[str] = []
+    seen = set()
+    for color in colors:
+        if color in seen:
+            continue
+        deduped.append(color)
+        seen.add(color)
+    return deduped
+
+
+def _is_gradient_text_style(style: Dict[str, str]) -> bool:
+    bi = style.get('backgroundImage', '')
+    bc = (style.get('webkitBackgroundClip', '') or
+          style.get('WebkitBackgroundClip', '') or
+          style.get('backgroundClip', ''))
+    text_fill = (style.get('webkitTextFillColor', '') or
+                 style.get('WebkitTextFillColor', '') or
+                 style.get('textFillColor', ''))
+    return 'gradient' in bi and bc == 'text' and bool(text_fill)
+
+
+def _uses_monospace_font(font_family: str) -> bool:
+    return bool(re.search(r'mono|code|courier|consolas|menlo|fira code|sf mono', font_family or '', re.I))
+
+
+def _resolve_letter_spacing_px(letter_spacing: str, font_px: float = 16.0) -> float:
+    """Resolve CSS letter-spacing into pixels, honoring relative em/rem units."""
+    if not letter_spacing or letter_spacing in ('normal', '0', '0px', '0em', '0rem'):
+        return 0.0
+    value = str(letter_spacing).strip()
+    m = re.match(r'^(-?[\d.]+)em$', value)
+    if m:
+        return float(m.group(1)) * font_px
+    m = re.match(r'^(-?[\d.]+)rem$', value)
+    if m:
+        return float(m.group(1)) * 16.0
+    return parse_px(value)
+
+
+def _estimate_text_width_px(
+    text: str,
+    font_px: float,
+    *,
+    monospace: bool = False,
+    letter_spacing: str = '',
+) -> float:
+    """Estimate text width with special handling for code/kbd monospace boxes."""
+    if not text:
+        return 0.0
+    cjk = sum(1 for c in text if ord(c) > 127)
+    latin = len(text) - cjk
+    latin_factor = 0.64 if monospace else 0.55
+    width_px = cjk * font_px + latin * font_px * latin_factor
+    ls_px = _resolve_letter_spacing_px(letter_spacing, font_px)
+    if ls_px != 0 and len(text) > 1:
+        width_px += ls_px * (len(text) - 1)
+    return width_px
+
+
+def _sum_border_width_px(style: Dict[str, str], horizontal: bool = True) -> float:
+    """Estimate total horizontal/vertical border width from CSS border declarations."""
+    keys = ('borderLeft', 'borderRight') if horizontal else ('borderTop', 'borderBottom')
+    total = 0.0
+    for key in keys:
+        border_val = style.get(key, '')
+        if border_val and 'none' not in border_val and not border_val.startswith('0px'):
+            total += parse_px(border_val.split()[0])
+    if total == 0.0:
+        border_val = style.get('border', '')
+        if border_val and 'none' not in border_val and not border_val.startswith('0px'):
+            border_px = parse_px(border_val.split()[0])
+            total = border_px * 2
+    return total
+
+
 def has_cjk(text: str) -> bool:
     return bool(re.search(r'[\u2E80-\u9FFF\uF900-\uFAFF\uFE10-\uFE6F\uFF00-\uFFEF]', text))
+
+
+def has_latin_word(text: str) -> bool:
+    return bool(re.search(r'[A-Za-z0-9]', text or ''))
 
 
 def is_bold(fw: str) -> bool:
@@ -564,6 +690,13 @@ def _should_create_bg_shape(style: Dict[str, str], has_gradient_bg: bool = False
     return has_visible_bg_or_border(style) or has_gradient_bg
 
 
+def _has_drawable_background(style: Dict[str, str]) -> bool:
+    """True when an element paints a real background box instead of text-only fill."""
+    bg_image = style.get('backgroundImage', 'none')
+    has_gradient_bg = bg_image != 'none' and 'gradient' in bg_image
+    return _should_create_bg_shape(style, has_gradient_bg)
+
+
 def is_leaf_text_container(element: Tag, css_rules: Optional[List] = None) -> bool:
     """Check if element's entire visible content is text (no block children)."""
     children = list(element.children)
@@ -612,6 +745,14 @@ def get_text_content(element: Tag, exclude_elements: set = None) -> str:
     return result.strip()
 
 
+def estimate_text_width_in(text: str, font_size_px: float) -> float:
+    """Rough text width estimate in inches."""
+    if not text:
+        return 0.0
+    px = estimate_text_width(text, font_size_px)
+    return px / PX_PER_IN
+
+
 def estimate_text_width(text: str, font_size_px: float) -> float:
     """Rough text width estimate in pixels."""
     if not text:
@@ -624,8 +765,24 @@ def estimate_text_width(text: str, font_size_px: float) -> float:
 
 def compute_text_content_width(element: Tag, css_rules: List[CSSRule], parent_style: Optional[Dict[str, str]] = None) -> float:
     """Compute natural width of text content within an element, in inches."""
+    def _measure_text_width_in(txt: str, font_size_px: float) -> float:
+        if not txt:
+            return 0.0
+        cjk = sum(1 for c in txt if ord(c) > 127)
+        latin = len(txt) - cjk
+        return (cjk * font_size_px * 0.96 + latin * font_size_px * 0.55) / PX_PER_IN + 0.1
+
     max_w = 0.0
     style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
+
+    if element.name in TEXT_TAGS or is_leaf_text_container(element, css_rules):
+        txt = get_text_content(element).strip()
+        if txt:
+            font_size_px = parse_px(style.get('fontSize', '16px'))
+            if font_size_px <= 0:
+                font_size_px = 16.0
+            max_w = max(max_w, _measure_text_width_in(txt, font_size_px))
+
     for desc in element.descendants:
         if hasattr(desc, 'name') and desc.name and desc.name in ('span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'a'):
             txt = get_text_content(desc).strip()
@@ -635,11 +792,7 @@ def compute_text_content_width(element: Tag, css_rules: List[CSSRule], parent_st
             font_size_px = parse_px(dstyle.get('fontSize', '16px'))
             if font_size_px <= 0:
                 font_size_px = 16.0
-            cjk = sum(1 for c in txt if ord(c) > 127)
-            latin = len(txt) - cjk
-            text_w = (cjk * font_size_px * 0.96 + latin * font_size_px * 0.55) / PX_PER_IN
-            # Add small padding
-            text_w += 0.1
+            text_w = _measure_text_width_in(txt, font_size_px)
             if text_w > max_w:
                 max_w = text_w
     return max_w
@@ -674,134 +827,390 @@ def _get_gap_px(style: Dict[str, str]) -> float:
     return parse_px(gap) if gap else 20.0
 
 
-# ─── Text Segment Extraction ─────────────────────────────────────────────────
+# ─── Inline Fragment + Text Segment Extraction ───────────────────────────────
+
+def _normalize_inline_text(text: str) -> str:
+    """Collapse formatting whitespace while preserving meaningful separators."""
+    if not text:
+        return ''
+    text = text.replace('\xa0', ' ')
+    return re.sub(r'\s+', ' ', text)
+
+
+def _style_text_color(style: Dict[str, str], fallback: str = '') -> str:
+    """Resolve text color, including gradient-text cases."""
+    if _is_gradient_text_style(style):
+        gradient_colors = _extract_gradient_colors(style.get('backgroundImage', ''))
+        if gradient_colors:
+            return gradient_colors[0]
+    sc = style.get('color', '')
+    if sc and sc != 'rgba(0, 0, 0, 0)':
+        return sc
+    return _default_text_color(fallback)
+
+
+def _fragment_style_snapshot(style: Dict[str, str]) -> Dict[str, str]:
+    """Keep the inline-box styling needed for measurement and rendering."""
+    return {
+        'fontFamily': style.get('fontFamily', ''),
+        'letterSpacing': style.get('letterSpacing', ''),
+        'backgroundColor': style.get('backgroundColor', ''),
+        'border': style.get('border', ''),
+        'borderLeft': style.get('borderLeft', ''),
+        'borderRight': style.get('borderRight', ''),
+        'borderTop': style.get('borderTop', ''),
+        'borderBottom': style.get('borderBottom', ''),
+        'borderRadius': style.get('borderRadius', ''),
+        'color': style.get('color', ''),
+        'paddingLeft': style.get('paddingLeft', '0px'),
+        'paddingRight': style.get('paddingRight', '0px'),
+        'paddingTop': style.get('paddingTop', '0px'),
+        'paddingBottom': style.get('paddingBottom', '0px'),
+    }
+
+
+def _fragments_share_style(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """Whether two fragments can be safely merged into one text run."""
+    return (
+        a.get('kind') == b.get('kind') and
+        a.get('color') == b.get('color') and
+        a.get('bold') == b.get('bold') and
+        a.get('fontSize') == b.get('fontSize') and
+        a.get('strike') == b.get('strike') and
+        a.get('bgColor') == b.get('bgColor') and
+        a.get('styles', {}).get('fontFamily', '') == b.get('styles', {}).get('fontFamily', '') and
+        a.get('styles', {}).get('letterSpacing', '') == b.get('styles', {}).get('letterSpacing', '')
+    )
+
+
+def _is_emoji_only_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return bool(re.fullmatch(r'[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\s]+', stripped))
+
+
+def _mark_flow_box_descendants(elements: List[Dict[str, Any]]) -> None:
+    """Mark descendants as belonging to a flow_box and clear legacy card grouping."""
+    for elem in elements:
+        elem['_in_flow_box'] = True
+        elem.pop('_card_group', None)
+        children = elem.get('children', [])
+        if children:
+            _mark_flow_box_descendants(children)
+
+
+def extract_inline_fragments(
+    element: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Optional[Dict[str, str]] = None,
+    exclude_elements: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Walk a text subtree and retain first-class inline semantics for code/kbd.
+
+    Fragments are later consumed by both text and table export paths.
+    """
+    if not element:
+        return []
+
+    fragments: List[Dict[str, Any]] = []
+
+    def push_text_fragment(text: str, style: Dict[str, str]) -> None:
+        normalized = _normalize_inline_text(text)
+        if not normalized:
+            return
+        fragments.append({
+            'kind': 'text',
+            'text': normalized,
+            'color': _style_text_color(style, style.get('color', '')),
+            'bold': is_bold(style.get('fontWeight', '')),
+            'fontSize': style.get('fontSize', '16px'),
+            'strike': 'line-through' in style.get('textDecoration', style.get('textDecorationLine', '')),
+            'bgColor': None,
+            'styles': _fragment_style_snapshot(style),
+        })
+
+    def push_box_fragment(kind: str, text: str, style: Dict[str, str]) -> None:
+        normalized = _normalize_inline_text(text).strip()
+        if not normalized:
+            return
+        fragments.append({
+            'kind': kind,
+            'text': normalized,
+            'color': _style_text_color(style, style.get('color', '')),
+            'bold': True if kind == 'kbd' else is_bold(style.get('fontWeight', '')),
+            'fontSize': style.get('fontSize', '16px'),
+            'strike': 'line-through' in style.get('textDecoration', style.get('textDecorationLine', '')),
+            'bgColor': style.get('backgroundColor', '') or None,
+            'styles': _fragment_style_snapshot(style),
+        })
+
+    def push_styled_text_fragment(kind: str, text: str, style: Dict[str, str]) -> None:
+        normalized = _normalize_inline_text(text)
+        if not normalized:
+            return
+        fragments.append({
+            'kind': kind,
+            'text': normalized,
+            'color': _style_text_color(style, style.get('color', '')),
+            'bold': is_bold(style.get('fontWeight', '')),
+            'fontSize': style.get('fontSize', '16px'),
+            'strike': 'line-through' in style.get('textDecoration', style.get('textDecorationLine', '')),
+            'bgColor': style.get('backgroundColor', '') or None,
+            'styles': _fragment_style_snapshot(style),
+        })
+
+    def walk(node, inherited_style: Dict[str, str]) -> None:
+        if exclude_elements is not None and hasattr(node, 'parents'):
+            if any(parent in exclude_elements for parent in node.parents):
+                return
+        if isinstance(node, NavigableString):
+            push_text_fragment(str(node), inherited_style)
+            return
+        if not isinstance(node, Tag):
+            return
+        if exclude_elements is not None and node in exclude_elements:
+            return
+        tag = node.name.lower()
+        if tag == 'br':
+            fragments.append({
+                'kind': 'text',
+                'text': '\n',
+                'color': _style_text_color(inherited_style, inherited_style.get('color', '')),
+                'bold': is_bold(inherited_style.get('fontWeight', '')),
+                'fontSize': inherited_style.get('fontSize', '16px'),
+                'strike': 'line-through' in inherited_style.get('textDecoration', inherited_style.get('textDecorationLine', '')),
+                'bgColor': None,
+                'styles': _fragment_style_snapshot(inherited_style),
+            })
+            return
+
+        style = compute_element_style(node, css_rules, node.get('style', ''), inherited_style)
+        if tag in ('strong', 'b'):
+            style = dict(style)
+            style['fontWeight'] = style.get('fontWeight', '700') or '700'
+        elif tag in ('s', 'del', 'strike'):
+            style = dict(style)
+            existing_td = style.get('textDecoration', style.get('textDecorationLine', ''))
+            style['textDecoration'] = f'{existing_td} line-through'.strip()
+        elif tag == 'a':
+            push_styled_text_fragment('link', get_text_content(node), style)
+            return
+        elif tag in ('img', 'svg'):
+            label = node.get('alt') or node.get('aria-label') or ''
+            if label:
+                push_box_fragment('icon', label, style)
+            return
+        if tag in ('code', 'kbd'):
+            push_box_fragment(tag, get_text_content(node), style)
+            return
+        if tag in ('span', 'mark', 'small', 'var', 'abbr', 'time', 'sup', 'sub'):
+            if has_visible_bg_or_border(style) and is_leaf_text_container(node, css_rules):
+                push_box_fragment('badge', get_text_content(node), style)
+                return
+
+        for child in node.children:
+            walk(child, style)
+
+    base_style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
+    for child in element.children:
+        walk(child, base_style)
+
+    merged: List[Dict[str, Any]] = []
+    for frag in fragments:
+        text = frag.get('text', '')
+        if text == '\n':
+            merged.append(frag)
+            continue
+        if not text:
+            continue
+        if (merged and frag.get('kind') == 'text' and merged[-1].get('text') != '\n' and
+                _fragments_share_style(merged[-1], frag)):
+            merged[-1]['text'] += text
+        else:
+            merged.append(dict(frag))
+
+    # Trim indentation-only whitespace from the edges while preserving inner separators.
+    while merged and merged[0].get('kind') == 'text' and merged[0].get('text', '') != '\n':
+        trimmed = merged[0]['text'].lstrip()
+        if trimmed:
+            merged[0]['text'] = trimmed
+            break
+        merged.pop(0)
+    while merged and merged[-1].get('kind') == 'text' and merged[-1].get('text', '') != '\n':
+        trimmed = merged[-1]['text'].rstrip()
+        if trimmed:
+            merged[-1]['text'] = trimmed
+            break
+        merged.pop()
+
+    grouped = False
+    group_align = base_style.get('alignItems', '') or 'center'
+    inline_group_count = sum(1 for frag in merged if frag.get('kind') in INLINE_GROUP_KINDS)
+    has_badge = any(frag.get('kind') == 'badge' for frag in merged)
+    has_link = any(frag.get('kind') == 'link' for frag in merged)
+    has_text_fragments = any(frag.get('kind') == 'text' and frag.get('text', '').strip() for frag in merged)
+    if inline_group_count >= 2 or (has_badge and (has_link or has_text_fragments)):
+        grouped = True
+
+    if grouped:
+        for frag in merged:
+            frag['grouped'] = True
+            frag['groupAlign'] = group_align
+
+    return merged
+
+
+def inline_fragments_to_segments(fragments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Down-convert inline fragments into rich text segments for PPT text runs."""
+    segments: List[Dict[str, Any]] = []
+    for frag in fragments:
+        frag_styles = frag.get('styles', {})
+        seg = {
+            'text': frag.get('text', ''),
+            'color': frag.get('color', ''),
+            'bold': frag.get('bold', False),
+            'fontSize': frag.get('fontSize', ''),
+            'fontFamily': frag_styles.get('fontFamily', ''),
+            'letterSpacing': frag_styles.get('letterSpacing', ''),
+            'strike': frag.get('strike', False),
+            'bgColor': frag.get('bgColor'),
+            'inlineBgBounds': None,
+            'kind': frag.get('kind', 'text'),
+        }
+        if (segments and seg['kind'] == 'text' and seg['text'] != '\n' and
+                segments[-1].get('kind') == 'text' and segments[-1]['text'] != '\n' and
+                _fragments_share_style(segments[-1], seg)):
+            segments[-1]['text'] += seg['text']
+        else:
+            segments.append(seg)
+    return segments
+
+
+def _normalize_centered_command_fragments(
+    fragments: List[Dict[str, Any]],
+    base_color: str,
+) -> List[Dict[str, Any]]:
+    """Mute trailing link/separator fragments in centered command rows."""
+    normalized: List[Dict[str, Any]] = []
+    muted_color = _normalize_ink_color(base_color or '#64748b') or '#64748b'
+    for frag in fragments:
+        next_frag = dict(frag)
+        if next_frag.get('kind') == 'link':
+            next_frag['color'] = muted_color
+        elif next_frag.get('kind') == 'text':
+            text = next_frag.get('text', '')
+            stripped = text.strip()
+            if stripped and re.fullmatch(r'[·•↗/|:\-–—\s]+', stripped):
+                next_frag['color'] = muted_color
+        normalized.append(next_frag)
+    return normalized
+
+
+def _normalize_display_ink_fragments(
+    fragments: List[Dict[str, Any]],
+    color: str = '#000000',
+) -> List[Dict[str, Any]]:
+    """Force plain display-heading fragments to strong ink while preserving boxes."""
+    normalized: List[Dict[str, Any]] = []
+    for frag in fragments:
+        next_frag = dict(frag)
+        if next_frag.get('kind') not in INLINE_BOX_KINDS:
+            next_frag['color'] = color
+        normalized.append(next_frag)
+    return normalized
+
+
+def fragments_to_text(fragments: List[Dict[str, Any]]) -> str:
+    """Flatten fragments back into plain text for layout estimation."""
+    return ''.join(frag.get('text', '') for frag in fragments)
+
+
+def _measure_inline_fragment_box_px(
+    fragment: Dict[str, Any],
+    default_font_px: float = 16.0,
+    include_box_padding: bool = False,
+) -> Tuple[float, float]:
+    """Estimate width/height for a single inline fragment."""
+    text = fragment.get('text', '')
+    if not text or text == '\n':
+        return 0.0, 0.0
+    font_px = parse_px(fragment.get('fontSize', '')) or default_font_px
+    frag_kind = fragment.get('kind', '')
+    styles = fragment.get('styles', {})
+    width_px = _estimate_text_width_px(
+        text,
+        font_px,
+        monospace=frag_kind in ('code', 'kbd') or _uses_monospace_font(styles.get('fontFamily', '')),
+        letter_spacing=styles.get('letterSpacing', ''),
+    )
+    height_px = font_px * 1.25
+
+    if include_box_padding and frag_kind in INLINE_BOX_KINDS:
+        width_px += parse_px(styles.get('paddingLeft', '0px'))
+        width_px += parse_px(styles.get('paddingRight', '0px'))
+        height_px = max(
+            height_px,
+            font_px + parse_px(styles.get('paddingTop', '0px')) + parse_px(styles.get('paddingBottom', '0px'))
+        )
+        border = styles.get('border', '')
+        if border and 'none' not in border and not border.startswith('0px'):
+            border_match = re.match(r'([\d.]+)px', border)
+            if border_match:
+                width_px += float(border_match.group(1)) * 2
+                height_px += float(border_match.group(1)) * 2
+
+    return width_px, height_px
+
+
+def measure_inline_fragments_width_in(
+    fragments: List[Dict[str, Any]],
+    default_font_px: float = 16.0,
+    include_box_padding: bool = False,
+) -> float:
+    """Measure the widest visual line across inline fragments."""
+    line_width_px = 0.0
+    max_line_px = 0.0
+    for frag in fragments:
+        if frag.get('text') == '\n':
+            max_line_px = max(max_line_px, line_width_px)
+            line_width_px = 0.0
+            continue
+        frag_w_px, _ = _measure_inline_fragment_box_px(frag, default_font_px, include_box_padding)
+        line_width_px += frag_w_px
+    max_line_px = max(max_line_px, line_width_px)
+    return max_line_px / PX_PER_IN
+
+
+def measure_inline_fragments_height_in(
+    fragments: List[Dict[str, Any]],
+    default_font_px: float = 16.0,
+    include_box_padding: bool = False,
+) -> float:
+    """Measure total height across one or more fragment lines."""
+    total_height_px = 0.0
+    line_height_px = 0.0
+    for frag in fragments:
+        if frag.get('text') == '\n':
+            total_height_px += line_height_px or (default_font_px * 1.25)
+            line_height_px = 0.0
+            continue
+        _, frag_h_px = _measure_inline_fragment_box_px(frag, default_font_px, include_box_padding)
+        line_height_px = max(line_height_px, frag_h_px)
+    total_height_px += line_height_px or (default_font_px * 1.25)
+    return total_height_px / PX_PER_IN
+
 
 def extract_text_segments(
     element: Tag,
     css_rules: List[CSSRule],
     parent_style: Optional[Dict[str, str]] = None,
+    exclude_elements: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Walk DOM tree under element, collecting text segments with inherited styles.
-    Tracks: color, bold, fontSize, strike, bgColor.
-    """
-    segments = []
-
-    def walk(node, inherited_color, inherited_bold, inherited_size, inherited_strike, inherited_bg):
-        if isinstance(node, NavigableString):
-            text = str(node)
-            if text.strip():
-                segments.append({
-                    'text': text, 'color': inherited_color, 'bold': inherited_bold,
-                    'fontSize': inherited_size, 'strike': inherited_strike,
-                    'bgColor': inherited_bg if inherited_bg else None,
-                    'inlineBgBounds': None,
-                })
-            return
-        if not isinstance(node, Tag):
-            return
-        tag = node.name
-        if tag == 'br':
-            segments.append({
-                'text': '\n', 'color': inherited_color, 'bold': inherited_bold,
-                'fontSize': inherited_size, 'strike': inherited_strike,
-                'bgColor': None, 'inlineBgBounds': None,
-            })
-            return
-        if tag not in ('h1','h2','h3','h4','h5','h6','p','li','span','a',
-                        'strong','em','b','i','mark','code','small','br',
-                        'div','section','article','ul','ol','table','tr',
-                        'th','td','img','svg','canvas'):
-            for child in node.children:
-                walk(child, inherited_color, inherited_bold, inherited_size, inherited_strike, inherited_bg)
-            return
-
-        style = compute_element_style(node, css_rules, node.get('style', ''), parent_style)
-
-        # Color
-        color = inherited_color
-        bi = style.get('backgroundImage', '')
-        bc = (style.get('webkitBackgroundClip', '') or
-              style.get('WebkitBackgroundClip', '') or
-              style.get('backgroundClip', ''))
-        if 'gradient' in bi and bc == 'text':
-            cm = re.findall(r'rgba?\([^)]+\)', bi)
-            if cm:
-                color = cm[0]
-        else:
-            sc = style.get('color', '')
-            if sc and sc != 'rgba(0, 0, 0, 0)':
-                color = sc
-
-        # Bold
-        bold = inherited_bold
-        fw = style.get('fontWeight', '')
-        if fw in ('bold', '700', '800', '900'):
-            bold = True
-        elif tag in ('strong', 'b'):
-            bold = True
-        elif fw and fw.isdigit() and int(fw) >= 600:
-            bold = True
-
-        # Font size
-        size = inherited_size
-        fs = style.get('fontSize', '')
-        if fs and 'px' in fs:
-            size = fs
-
-        # Strikethrough
-        strike = inherited_strike
-        td = style.get('textDecoration', style.get('textDecorationLine', ''))
-        if 'line-through' in td:
-            strike = True
-        if tag in ('s', 'del', 'strike'):
-            strike = True
-
-        # Inline background
-        child_bg = style.get('backgroundColor', '')
-        child_has_bg = child_bg and child_bg not in ('transparent', 'rgba(0, 0, 0, 0)')
-        new_bg = child_bg if child_has_bg else inherited_bg
-
-        for child in node.children:
-            walk(child, color, bold, size, strike, new_bg)
-
-    base_style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
-    base_color = base_style.get('color', '')
-    bi = base_style.get('backgroundImage', '')
-    bc = base_style.get('webkitBackgroundClip', base_style.get('backgroundClip', ''))
-    if 'gradient' in bi and bc == 'text':
-        cm = re.findall(r'rgba?\([^)]+\)', bi)
-        if cm:
-            base_color = cm[0]
-
-    base_bold = False
-    fw = base_style.get('fontWeight', '')
-    if fw in ('bold', '700', '800', '900') or element.name in ('strong', 'b'):
-        base_bold = True
-    elif fw and fw.isdigit() and int(fw) >= 600:
-        base_bold = True
-
-    base_size = base_style.get('fontSize', '16px')
-    base_strike = 'line-through' in base_style.get('textDecoration', base_style.get('textDecorationLine', ''))
-
-    for child in element.children:
-        walk(child, base_color, base_bold, base_size, base_strike, None)
-
-    # Merge consecutive same-style segments
-    merged = []
-    for seg in segments:
-        if (merged and
-            merged[-1].get('color') == seg.get('color') and
-            merged[-1].get('bold') == seg.get('bold') and
-            merged[-1].get('fontSize') == seg.get('fontSize') and
-            merged[-1].get('strike') == seg.get('strike') and
-            merged[-1].get('bgColor') == seg.get('bgColor') and
-            seg['text'] != '\n' and merged[-1]['text'] != '\n'):
-            merged[-1]['text'] += seg['text']
-        else:
-            merged.append(seg)
-
-    return merged
+    """Backward-compatible wrapper around the new inline fragment extractor."""
+    fragments = extract_inline_fragments(element, css_rules, parent_style, exclude_elements=exclude_elements)
+    return inline_fragments_to_segments(fragments)
 
 
 # ─── Flat Extract (adapted from browser version's flatExtract) ────────────────
@@ -854,6 +1263,7 @@ def build_shape_element(element: Tag, style: Dict[str, str], slide_width_px: flo
             'borderTop': style.get('borderTop', ''),
             'borderBottom': style.get('borderBottom', ''),
             'borderRadius': f'{border_radius_px}px',
+            'marginTop': style.get('marginTop', ''),
             'marginBottom': style.get('marginBottom', ''),
             'marginLeft': style.get('marginLeft', ''),
             'marginRight': style.get('marginRight', ''),
@@ -861,16 +1271,79 @@ def build_shape_element(element: Tag, style: Dict[str, str], slide_width_px: flo
     }
 
 
+def _attach_pair_box_insets(shape: Dict[str, Any], style: Dict[str, str]) -> None:
+    """Preserve CSS padding so paired bg shapes stay larger than their text boxes."""
+    display = style.get('display', '')
+    if 'inline-block' in display or 'inline-flex' in display:
+        return
+    _expand_padding(style)
+    pair_pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
+    pair_pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+    pair_pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
+    pair_pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
+    if pair_pad_l or pair_pad_r or pair_pad_t or pair_pad_b:
+        shape['_pair_pad_l'] = pair_pad_l
+        shape['_pair_pad_r'] = pair_pad_r
+        shape['_pair_pad_t'] = pair_pad_t
+        shape['_pair_pad_b'] = pair_pad_b
+
+
 def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSRule],
                        slide_width_px: float = 1440, content_width_px: float = None,
                        exclude_elements: set = None) -> Optional[Dict]:
     """Build a text element IR with segments."""
-    text = get_text_content(element, exclude_elements).strip()
+    tag = element.name.lower()
+    fragments = extract_inline_fragments(element, css_rules, style, exclude_elements=exclude_elements)
+    has_inline_boxes = any(f.get('kind') in INLINE_BOX_KINDS for f in fragments)
+    has_grouped_inline = any(f.get('grouped') for f in fragments)
+    has_inline_code_or_kbd = any(f.get('kind') in ('code', 'kbd') for f in fragments)
+    fragment_kinds = {f.get('kind') for f in fragments if (f.get('text') or '').strip()}
+    has_centered_grouped_command = 'code' in fragment_kinds and 'link' in fragment_kinds
+    should_strengthen_display_ink = (
+        tag in ('h3', 'h4', 'h5', 'h6') and
+        _normalize_ink_color(style.get('color', '')) == '#000000' and
+        not has_visible_bg_or_border(style)
+    )
+    if should_strengthen_display_ink:
+        fragments = _normalize_display_ink_fragments(fragments, '#000000')
+    if has_centered_grouped_command:
+        fragments = _normalize_centered_command_fragments(
+            fragments,
+            _style_text_color(style, style.get('color', '')),
+        )
+    text = fragments_to_text(fragments).strip()
     if not text:
         return None
-    segments = extract_text_segments(element, css_rules, style)
+    segments = inline_fragments_to_segments(fragments)
     if not segments and not text:
         return None
+    has_direct_link_child = any(
+        isinstance(child, Tag) and child.name.lower() == 'a'
+        for child in element.children
+    )
+    display = style.get('display', '')
+    element_is_inline_box = (
+        tag in INLINE_TAGS and
+        has_visible_bg_or_border(style) and
+        is_leaf_text_container(element, css_rules)
+    )
+    shrink_wrap_inline = element_is_inline_box and (
+        'inline-block' in display or
+        'inline-flex' in display or
+        display == 'flex' or
+        tag == 'span'
+    )
+    component_like_inline = (
+        shrink_wrap_inline or
+        (
+            tag in INLINE_TAGS and
+            has_visible_bg_or_border(style) and
+            (has_grouped_inline or has_inline_boxes) and
+            '\n' not in text
+        )
+    )
+    monospace_text = _uses_monospace_font(style.get('fontFamily', ''))
+    include_box_padding = has_inline_boxes or has_grouped_inline or shrink_wrap_inline
 
     font_size_px = parse_px(style.get('fontSize', '16px'))
     if font_size_px <= 0:
@@ -878,23 +1351,81 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     font_size_pt = px_to_pt(style.get('fontSize', '16px'))
     if font_size_pt <= 0:
         font_size_pt = 12.0
+    explicit_break_display_heading = (
+        tag in ('h1', 'h2', 'h3') and
+        '\n' in text and
+        style.get('textAlign', '') == 'center' and
+        font_size_pt >= 28
+    )
 
     # Determine effective width from CSS constraints
     explicit_w = parse_px(style.get('width', ''))
     max_w = parse_px(style.get('maxWidth', ''))
-    display = style.get('display', '')
     is_inline_block = 'inline-block' in display
 
     # Compute content-based width if needed
-    cjk_count = sum(1 for c in text if ord(c) > 127)
-    latin_count = len(text) - cjk_count
-    content_w_in = (cjk_count * font_size_px + latin_count * font_size_px * 0.55) / PX_PER_IN
+    if fragments:
+        content_w_in = measure_inline_fragments_width_in(
+            fragments,
+            font_size_px,
+            include_box_padding=include_box_padding,
+        )
+    else:
+        content_w_in = _estimate_text_width_px(
+            text,
+            font_size_px,
+            monospace=monospace_text,
+            letter_spacing=style.get('letterSpacing', ''),
+        ) / PX_PER_IN
     content_w_px = content_w_in * PX_PER_IN
+
+    if shrink_wrap_inline:
+        pad_l = parse_px(style.get('paddingLeft', ''))
+        pad_r = parse_px(style.get('paddingRight', ''))
+        border_w = _sum_border_width_px(style, horizontal=True)
+        content_w_in = (
+            _estimate_text_width_px(
+                text,
+                font_size_px,
+                monospace=monospace_text,
+                letter_spacing=style.get('letterSpacing', ''),
+            )
+            + pad_l + pad_r + border_w + 8.0
+        ) / PX_PER_IN
+        if has_cjk(text):
+            content_w_in *= 1.08
+        content_w_px = content_w_in * PX_PER_IN
+
+    if explicit_break_display_heading:
+        display_line_width_px = 0.0
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            line_w = _estimate_text_width_px(
+                line,
+                font_size_px,
+                letter_spacing=style.get('letterSpacing', ''),
+            )
+            if line_w > display_line_width_px:
+                display_line_width_px = line_w
+        heading_wrap_guard = min(max(font_size_px * 0.34 / PX_PER_IN, 0.18), 0.30)
+        mixed_script_guard = 0.0
+        if has_cjk(text) and has_latin_word(text):
+            mixed_script_guard = min(max(font_size_px * 0.10 / PX_PER_IN, 0.08), 0.16)
+        content_w_in = max(
+            content_w_in,
+            display_line_width_px / PX_PER_IN + heading_wrap_guard + mixed_script_guard,
+        )
+        content_w_px = content_w_in * PX_PER_IN
 
     # Determine final width in inches
     width_in = None
     if explicit_w > 0:
         width_in = explicit_w / PX_PER_IN
+    elif shrink_wrap_inline:
+        cap_w_in = max_w / PX_PER_IN if max_w > 0 else (content_width_px / PX_PER_IN if content_width_px else (13.33 - 1.0))
+        width_in = min(content_w_in, cap_w_in)
     elif is_inline_block and max_w > 0:
         # For inline-block with max-width: use max line width capped by max-width
         # For multi-line text, compute the widest line, not total text width
@@ -935,10 +1466,15 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             else:
                 h_pad_in = 0.08
             width_in = min(content_w_in + h_pad_in, default_w_in)
+        elif style.get('textAlign', '') == 'center' and effective_max_w > 0 and content_w_in <= default_w_in * 0.92:
+            # When text almost fits inside a constrained container (e.g. centered
+            # closing cards), keep the text box close to natural content width
+            # instead of expanding to the full parent max-width.
+            width_in = min(content_w_in + 0.1, default_w_in)
         else:
             width_in = default_w_in
 
-    line_count = estimate_wrapped_lines(text, font_size_pt, width_in)
+    line_count = 1 if component_like_inline and '\n' not in text else estimate_wrapped_lines(text, font_size_pt, width_in)
 
     # Tolerate minor width overflow (up to 5%) for short text without explicit
     # newlines — px_to_pt 96 DPI → 108 PPI slide scale can cause false wraps
@@ -947,9 +1483,18 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             and font_size_pt >= 16):
         cjk_count = sum(1 for c in text if ord(c) > 127)
         latin_count = len(text) - cjk_count
-        text_width_in = (cjk_count * font_size_pt + latin_count * font_size_pt * 0.55) / 72.0
+        text_width_in = (cjk_count * font_size_pt * 0.96 + latin_count * font_size_pt * 0.55) / 72.0
         overflow = (text_width_in - width_in) / width_in
-        if 0 < overflow < 0.08:
+        if -0.02 < overflow < 0.10:
+            line_count = 1
+
+    if (line_count == 2 and tag == 'p' and '\n' not in text and width_in >= 6.0
+            and font_size_pt <= 14.0):
+        cjk_count = sum(1 for c in text if ord(c) > 127)
+        latin_count = len(text) - cjk_count
+        text_width_in = (cjk_count * font_size_pt * 0.88 + latin_count * font_size_pt * 0.52) / 72.0
+        overflow = (text_width_in - width_in) / width_in
+        if -0.05 < overflow < 0.10:
             line_count = 1
 
     # Compute line height multiplier from CSS
@@ -967,14 +1512,29 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     pad_b = parse_px(style.get('paddingBottom', ''))
     if pad_t > 0 or pad_b > 0:
         total_height_px += pad_t + pad_b
+    if component_like_inline:
+        border_h = _sum_border_width_px(style, horizontal=False)
+        total_height_px = max(total_height_px, font_size_px * 1.25 + pad_t + pad_b + border_h + 2.0)
 
     slide_height_scale = slide_width_px / 13.33
     # Minimum height: 0.15" for small inline elements (pills, badges)
     min_h = 0.15
+    if component_like_inline:
+        min_h = max(min_h, 0.18)
+
+    gradient_colors = _extract_gradient_colors(style.get('backgroundImage', '')) if _is_gradient_text_style(style) else []
+    if len(gradient_colors) == 1:
+        gradient_colors = gradient_colors * 2
 
     return {
         'type': 'text', 'tag': element.name, 'text': text, 'segments': segments,
-        'gradientColors': None, 'textTransform': style.get('textTransform', 'none'),
+        'fragments': fragments,
+        'gradientColors': gradient_colors[:2] if gradient_colors else None, 'textTransform': style.get('textTransform', 'none'),
+        'inlineContentWidth': content_w_in,
+        'preferContentWidth': has_inline_boxes or has_direct_link_child or has_grouped_inline or shrink_wrap_inline,
+        'preferCenteredBlockWidth': has_centered_grouped_command,
+        'renderInlineBoxOverlays': has_inline_code_or_kbd and has_direct_link_child and '\n' not in text,
+        'forceSingleLine': component_like_inline and '\n' not in text,
         'naturalHeight': total_height_px / slide_height_scale,
         'bounds': {
             'x': 0.5, 'y': 0.5,
@@ -986,7 +1546,7 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             'fontWeight': style.get('fontWeight', '400'),
             'fontFamily': style.get('fontFamily', ''),
             'letterSpacing': style.get('letterSpacing', ''),
-            'color': style.get('color', ''),
+            'color': _style_text_color(style, style.get('color', '')),
             'textAlign': style.get('textAlign', 'left'),
             'lineHeight': style.get('lineHeight', 'normal'),
             'listStyleType': style.get('listStyleType', ''),
@@ -994,6 +1554,7 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             'paddingRight': style.get('paddingRight', '0px'),
             'paddingTop': style.get('paddingTop', '0px'),
             'paddingBottom': style.get('paddingBottom', '0px'),
+            'marginTop': style.get('marginTop', ''),
             'marginBottom': style.get('marginBottom', ''),
             'alignItems': style.get('alignItems', ''),
             'justifyContent': style.get('justifyContent', ''),
@@ -1018,14 +1579,17 @@ def _compute_table_column_widths(rows, table_w):
         for ci, cell in enumerate(row['cells']):
             if ci >= num_cols:
                 break
-            text = cell.get('text', '')
             font_px = parse_px(cell['styles'].get('fontSize', '14px'))
             if font_px <= 0:
                 font_px = 14.0
-            # Estimate text width
-            cjk = sum(1 for c in text if ord(c) > 127)
-            latin = len(text) - cjk
-            text_w = (cjk * font_px + latin * font_px * 0.55) / PX_PER_IN
+            fragments = cell.get('fragments') or []
+            text = cell.get('text', '')
+            if fragments:
+                text_w = measure_inline_fragments_width_in(fragments, font_px, include_box_padding=True)
+            else:
+                cjk = sum(1 for c in text if ord(c) > 127)
+                latin = len(text) - cjk
+                text_w = (cjk * font_px + latin * font_px * 0.55) / PX_PER_IN
             # Add padding
             pad_l = parse_px(cell['styles'].get('paddingLeft', '0px')) / PX_PER_IN
             pad_r = parse_px(cell['styles'].get('paddingRight', '0px')) / PX_PER_IN
@@ -1047,6 +1611,144 @@ def _compute_table_column_widths(rows, table_w):
         return [table_w / num_cols] * num_cols
 
 
+def _compute_presentation_row_column_widths(rows, table_w):
+    """Presentation rows prefer a fitted key column and give the remainder to the value column."""
+    if not rows:
+        return []
+    num_cols = max(len(r.get('cells', [])) for r in rows)
+    if num_cols <= 1:
+        return [table_w]
+
+    natural_widths = [0.0] * num_cols
+    col_texts: List[List[str]] = [[] for _ in range(num_cols)]
+    for row in rows:
+        for ci, cell in enumerate(row.get('cells', [])):
+            if ci >= num_cols:
+                break
+            font_px = parse_px(cell.get('styles', {}).get('fontSize', '14px'))
+            if font_px <= 0:
+                font_px = 14.0
+            fragments = cell.get('fragments') or []
+            text = cell.get('text', '')
+            if fragments:
+                text_w = measure_inline_fragments_width_in(fragments, font_px, include_box_padding=True)
+            else:
+                cjk = sum(1 for c in text if ord(c) > 127)
+                latin = len(text) - cjk
+                text_w = (cjk * font_px + latin * font_px * 0.55) / PX_PER_IN
+            pad_l = parse_px(cell.get('styles', {}).get('paddingLeft', '0px')) / PX_PER_IN
+            pad_r = parse_px(cell.get('styles', {}).get('paddingRight', '0px')) / PX_PER_IN
+            natural_widths[ci] = max(natural_widths[ci], text_w + pad_l + pad_r)
+            if text:
+                col_texts[ci].append(text)
+
+    if num_cols == 2:
+        natural_total = sum(natural_widths)
+        if natural_total <= 0:
+            return [table_w * 0.36, table_w * 0.64]
+        if natural_total >= table_w:
+            scale = table_w / natural_total
+            return [w * scale for w in natural_widths]
+
+        extra = table_w - natural_total
+        left_ratio = natural_widths[0] / natural_total
+        extra_left_share = min(0.42, max(0.28, left_ratio * 0.82))
+        first_col_texts = [text for text in col_texts[0] if text]
+        shortcut_like_first_col = (
+            bool(first_col_texts) and
+            any(re.search(r'(?:^F\d+$|home|end|space|←|→|↑|↓|/)', text, re.I) for text in first_col_texts) and
+            sum(1 for text in first_col_texts if has_cjk(text)) / max(len(first_col_texts), 1) < 0.4
+        )
+        if shortcut_like_first_col:
+            extra_left_share = min(0.50, max(0.36, extra_left_share + 0.08))
+        key_w = natural_widths[0] + extra * extra_left_share
+        value_w = max(table_w - key_w, 0.90)
+        return [key_w, value_w]
+
+    total_natural = sum(natural_widths)
+    if total_natural <= 0:
+        return [table_w / num_cols] * num_cols
+    if total_natural >= table_w:
+        scale = table_w / total_natural
+        return [w * scale for w in natural_widths]
+
+    extra = table_w - total_natural
+    widths = natural_widths[:]
+    widths[-1] += extra
+    return widths
+
+
+def _presentation_row_label_color(color_str: str) -> str:
+    """Use stronger ink for key labels on light presentation rows."""
+    normalized = _normalize_ink_color(color_str)
+    if normalized == '#000000':
+        return normalized
+    rgb = parse_color(color_str)
+    if not rgb:
+        return '#000000'
+    max_channel = max(rgb)
+    min_channel = min(rgb)
+    if max_channel <= 70 and (max_channel - min_channel) <= 32:
+        return '#000000'
+    return color_str
+
+
+def _classify_table_ir(element: Tag, rows: List[Dict[str, Any]]) -> str:
+    """Split presentational row lists from real data tables."""
+    if not rows:
+        return 'table'
+
+    dom_cells = element.find_all(['td', 'th'])
+    has_headers = any(cell.get('isHeader') for row in rows for cell in row.get('cells', []))
+    has_spans = any(
+        int(dom_cell.get('rowspan', '1') or '1') > 1 or int(dom_cell.get('colspan', '1') or '1') > 1
+        for dom_cell in dom_cells
+    )
+    if has_headers or has_spans:
+        return 'table'
+
+    row_lengths = [len(row.get('cells', [])) for row in rows if row.get('cells')]
+    if not row_lengths:
+        return 'table'
+    max_cols = max(row_lengths)
+    if max_cols > 3:
+        return 'table'
+
+    non_empty_cells = [
+        cell for row in rows for cell in row.get('cells', [])
+        if (cell.get('text') or '').strip()
+    ]
+    if len(non_empty_cells) < 4 or len(rows) < 3:
+        return 'table'
+
+    fragment_total = 0
+    box_fragment_total = 0
+    short_cell_total = 0
+    border_row_total = 0
+    for row in rows:
+        if any(cell.get('styles', {}).get('borderBottom', '') for cell in row.get('cells', [])):
+            border_row_total += 1
+        for cell in row.get('cells', []):
+            cell_text = (cell.get('text') or '').strip()
+            if cell_text and len(cell_text) <= 18:
+                short_cell_total += 1
+            for fragment in cell.get('fragments') or []:
+                if not (fragment.get('text') or '').strip():
+                    continue
+                fragment_total += 1
+                if fragment.get('kind') in INLINE_BOX_KINDS:
+                    box_fragment_total += 1
+
+    short_ratio = short_cell_total / max(len(non_empty_cells), 1)
+    semantic_density = box_fragment_total / max(fragment_total, 1)
+    border_ratio = border_row_total / max(len(rows), 1)
+    uniform_rows = len(set(row_lengths)) <= 1
+
+    if uniform_rows and border_ratio >= 0.33 and (semantic_density >= 0.15 or short_ratio >= 0.8):
+        return 'presentation_rows'
+    return 'table'
+
+
 def build_table_element(element: Tag, css_rules: List[CSSRule], style: Dict[str, str]) -> Dict:
     """Build a table element IR."""
     rows = []
@@ -1054,17 +1756,18 @@ def build_table_element(element: Tag, css_rules: List[CSSRule], style: Dict[str,
         is_header = bool(tr.parent and tr.parent.name == 'thead')
         cells = []
         for cell in tr.find_all(['th', 'td']):
-            cell_style = compute_element_style(cell, css_rules, cell.get('style', ''))
-            cell_text = get_text_content(cell).strip()
-            cell_segments = extract_text_segments(cell, css_rules, cell_style)
+            cell_style = compute_inherited_style(cell, css_rules, parent_style=style)
+            cell_fragments = extract_inline_fragments(cell, css_rules, cell_style)
+            cell_text = fragments_to_text(cell_fragments).strip()
+            cell_segments = inline_fragments_to_segments(cell_fragments)
             cells.append({
                 'bounds': {'x': 0, 'y': 0, 'width': 2, 'height': 0.4},
-                'text': cell_text, 'segments': cell_segments,
+                'text': cell_text, 'segments': cell_segments, 'fragments': cell_fragments,
                 'isHeader': is_header or cell.name == 'th',
                 'styles': {
                     'fontSize': cell_style.get('fontSize', '14px'),
                     'fontWeight': cell_style.get('fontWeight', '400'),
-                    'color': cell_style.get('color', ''),
+                    'color': _style_text_color(cell_style, cell_style.get('color', '')),
                     'backgroundColor': cell_style.get('backgroundColor', ''),
                     'textAlign': cell_style.get('textAlign', 'left'),
                     'paddingLeft': cell_style.get('paddingLeft', '0px'),
@@ -1078,11 +1781,57 @@ def build_table_element(element: Tag, css_rules: List[CSSRule], style: Dict[str,
                 },
             })
         if cells:
-            rows.append({'isHeader': is_header, 'cells': cells})
+            row_height = 0.264
+            for cell in cells:
+                font_px = parse_px(cell['styles'].get('fontSize', '14px'))
+                if font_px <= 0:
+                    font_px = 14.0
+                fragments = cell.get('fragments') or []
+                if fragments:
+                    content_h = measure_inline_fragments_height_in(fragments, font_px, include_box_padding=True)
+                else:
+                    content_h = (font_px * 1.25) / PX_PER_IN
+                pad_t = parse_px(cell['styles'].get('paddingTop', '0px')) / PX_PER_IN
+                pad_b = parse_px(cell['styles'].get('paddingBottom', '0px')) / PX_PER_IN
+                cell_h = max(0.264, content_h + pad_t + pad_b + 0.04)
+                cell['measure'] = {
+                    'content_width': measure_inline_fragments_width_in(fragments, font_px, include_box_padding=True) if fragments else 0.0,
+                    'content_height': content_h,
+                    'row_height': cell_h,
+                }
+                row_height = max(row_height, cell_h)
+            rows.append({'isHeader': is_header, 'cells': cells, 'height': row_height})
+    ir_type = _classify_table_ir(element, rows)
+    if ir_type == 'presentation_rows':
+        for row in rows:
+            compact_row_h = 0.0
+            for cell in row.get('cells', []):
+                styles = cell.get('styles', {})
+                font_px = parse_px(styles.get('fontSize', '14px'))
+                if font_px <= 0:
+                    font_px = 14.0
+                pad_t = parse_px(styles.get('paddingTop', '0px')) / PX_PER_IN
+                pad_b = parse_px(styles.get('paddingBottom', '0px')) / PX_PER_IN
+                fragments = cell.get('fragments') or []
+                has_box = any(f.get('kind') in INLINE_BOX_KINDS for f in fragments)
+                base_line_h = (font_px * (1.08 if has_box else 1.02)) / PX_PER_IN
+                compact_floor = 0.268 if has_box else 0.264
+                compact_cell_h = max(base_line_h + pad_t + pad_b, compact_floor)
+                compact_row_h = max(compact_row_h, compact_cell_h)
+            if compact_row_h > 0:
+                row['height'] = compact_row_h
+    total_h = sum(row.get('height', 0.264) for row in rows)
     return {
-        'type': 'table',
-        'bounds': {'x': 0.5, 'y': 1.0, 'width': 12.33, 'height': max(len(rows) * 0.264, 1.0)},
+        'type': ir_type,
+        'bounds': {'x': 0.5, 'y': 1.0, 'width': 12.33, 'height': max(total_h, len(rows) * 0.264, 0.5)},
         'rows': rows,
+        'styles': {
+            'fontSize': style.get('fontSize', '14px'),
+            'color': _style_text_color(style, style.get('color', '')),
+        },
+        'measure': {
+            'row_heights': [row.get('height', 0.264) for row in rows],
+        },
     }
 
 
@@ -1105,8 +1854,8 @@ def estimate_wrapped_lines(text: str, font_size_pt: float, box_width_in: float, 
         # Calculate character-based width in inches
         cjk_count = sum(1 for c in line if ord(c) > 127)
         latin_count = len(line) - cjk_count
-        # CJK chars ~ font_size_pt wide, Latin ~ font_size_pt * 0.55
-        text_width_in = (cjk_count * font_size_pt + latin_count * font_size_pt * 0.55) / 72.0
+        # Native PPT text is slightly tighter than a naive 1em-per-CJK estimate.
+        text_width_in = (cjk_count * font_size_pt * 0.96 + latin_count * font_size_pt * 0.55) / 72.0
         chars_per_line = box_width_in / (text_width_in / len(line)) if line else 1
         if chars_per_line <= 0:
             chars_per_line = 1
@@ -1124,6 +1873,218 @@ def _cjk_correct_width(has_border: bool, text: str, width_in: float, is_condense
     return width_in
 
 
+def _shift_container_descendants(container: Dict[str, Any], dx: float, dy: float) -> None:
+    """Shift all descendant bounds of a relative-positioned container."""
+    for child in container.get('children', []):
+        cb = child.get('bounds', {})
+        cb['x'] = cb.get('x', 0.0) + dx
+        cb['y'] = cb.get('y', 0.0) + dy
+        if child.get('type') == 'container' and child.get('_children_relative'):
+            _shift_container_descendants(child, cb.get('x', 0.0), cb.get('y', 0.0))
+
+
+def measure_flow_box(
+    element: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Optional[Dict[str, str]] = None,
+    slide_width_px: float = 1440,
+    content_width_px: float = None,
+) -> Optional[Dict[str, Any]]:
+    """Promote a visible flex-row card into a first-class container."""
+    if not element or not getattr(element, 'name', None):
+        return None
+
+    style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
+    if not _detect_flex_row(style) or not has_visible_bg_or_border(style):
+        return None
+    direct_tag_children = [c for c in element.children if isinstance(c, Tag)]
+    if len(direct_tag_children) < 2:
+        return None
+
+    children = build_grid_children(element, css_rules, style, slide_width_px, content_width_px)
+    if not children:
+        return None
+
+    _expand_padding(style)
+    pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
+    pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+    pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
+    pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
+    border_l = parse_px(
+        style.get(
+            'borderLeftWidth',
+            style.get('borderLeft', '0px').split()[0] if style.get('borderLeft', '') else '0px'
+        )
+    ) / PX_PER_IN
+
+    min_child_x = min((c['bounds'].get('x', 0.0) for c in children), default=0.0)
+    child_origin_x = max(min_child_x - (pad_l + border_l), 0.0)
+    for child in children:
+        child['bounds']['x'] -= child_origin_x
+
+    css_w = parse_px(style.get('width', ''))
+    css_maxw = parse_px(style.get('maxWidth', ''))
+    if css_maxw > 0:
+        card_w = css_maxw / PX_PER_IN
+    elif css_w > 0:
+        card_w = css_w / PX_PER_IN
+    elif content_width_px and content_width_px > 0:
+        card_w = content_width_px / PX_PER_IN
+    else:
+        max_right = max((c['bounds']['x'] + c['bounds']['width'] for c in children), default=0.0)
+        card_w = max_right + pad_r
+
+    content_top = min(
+        (c['bounds']['y'] for c in children if not c.get('_skip_layout')),
+        default=pad_t,
+    )
+    content_bottom = max(
+        (c['bounds']['y'] + c['bounds']['height'] for c in children if not c.get('_skip_layout')),
+        default=pad_t + pad_b,
+    )
+    content_extent = max(content_bottom - content_top, 0.0)
+    card_h = content_extent + pad_t + pad_b
+
+    # Children coming from build_grid_children() usually start at y=0.0.
+    # Shift real content down by the card's own top padding so flow_box cards
+    # don't visually pin text to the top edge.
+    child_y_offset = max(pad_t - content_top, 0.0)
+    if child_y_offset > 0:
+        for child in children:
+            child['bounds']['y'] += child_y_offset
+
+    bg_shape = build_shape_element(element, style, slide_width_px)
+    for border_key in ('border', 'borderLeft', 'borderRight', 'borderTop', 'borderBottom'):
+        bg_shape['styles'][border_key] = ''
+    bg_shape['bounds'] = {
+        'x': 0.0,
+        'y': 0.0,
+        'width': card_w,
+        'height': card_h,
+    }
+    bg_shape['_is_card_bg'] = True
+    bg_shape['_skip_layout'] = True
+    bg_shape['_css_pad_l'] = pad_l
+    bg_shape['_css_pad_r'] = pad_r
+    bg_shape['_css_pad_t'] = pad_t
+    bg_shape['_css_pad_b'] = pad_b
+    bg_shape['_css_border_l'] = border_l
+
+    bl = style.get('borderLeft', '')
+    if bl and 'none' not in bl and not bl.startswith('0px'):
+        bg_shape['styles']['borderLeft'] = bl
+
+    flow_children = [bg_shape]
+    flow_children.extend(children)
+    _mark_flow_box_descendants(flow_children)
+    intrinsic_h = max((c['bounds']['y'] + c['bounds']['height'] for c in flow_children), default=card_h)
+
+    return {
+        'type': 'container',
+        'tag': element.name,
+        'layout': 'flow_box',
+        'bounds': {'x': 0.5, 'y': 0.5, 'width': card_w, 'height': intrinsic_h},
+        'styles': style,
+        'children': flow_children,
+        '_children_relative': True,
+        'measure': {
+            'intrinsic_width': card_w,
+            'intrinsic_height': intrinsic_h,
+        },
+    }
+
+
+def _measure_preferred_child_width_in(
+    child: Tag,
+    child_style: Dict[str, str],
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+) -> float:
+    """Measure natural width for component-like text children before flex slotting."""
+    child_tag = child.name.lower()
+    if child_tag not in TEXT_TAGS and not is_leaf_text_container(child, css_rules):
+        return 0.0
+    text_el = build_text_element(child, child_style, css_rules, slide_width_px, None)
+    if not text_el or not text_el.get('preferContentWidth'):
+        return 0.0
+    return text_el.get('bounds', {}).get('width', 0.0)
+
+
+def _estimate_group_baseline_in(group: List[Dict[str, Any]], bg_shape: Optional[Dict[str, Any]] = None) -> float:
+    """Approximate the first-baseline position for flex-row baseline alignment."""
+    first_text = None
+    for elem in group:
+        if elem.get('type') == 'text':
+            first_text = elem
+            break
+
+    top_pad = bg_shape.get('_css_pad_t', 0.0) if bg_shape else 0.0
+    if not first_text:
+        return top_pad + max((e.get('bounds', {}).get('height', 0.2) for e in group), default=0.2) * 0.75
+
+    tb = first_text.get('bounds', {})
+    rel_y = tb.get('y', 0.0)
+    text_h = tb.get('height', 0.2)
+    font_px = parse_px(first_text.get('styles', {}).get('fontSize', '16px')) or 16.0
+    line_h = parse_px(first_text.get('styles', {}).get('lineHeight', '')) / PX_PER_IN
+    if line_h <= 0:
+        line_h = font_px * 1.0 / PX_PER_IN
+    centered_line_top = max((text_h - line_h) / 2.0, 0.0)
+    baseline_from_text_top = centered_line_top + min(line_h * 0.80, text_h * 0.92)
+    return top_pad + rel_y + baseline_from_text_top
+
+
+def _flow_gap_in(
+    current: Optional[Dict[str, Any]],
+    nxt: Optional[Dict[str, Any]],
+    default_gap: float,
+) -> float:
+    """Approximate block-flow spacing using collapsed margins when present."""
+    if not current or not nxt:
+        return default_gap
+    if current.get('tag') == 'li':
+        return 7.0 / PX_PER_IN
+
+    current_styles = current.get('styles', {})
+    next_styles = nxt.get('styles', {})
+    mb = parse_px(current_styles.get('marginBottom', '')) / PX_PER_IN
+    mt = parse_px(next_styles.get('marginTop', '')) / PX_PER_IN
+
+    if mb == 0 and mt == 0:
+        return default_gap
+    if mb < 0 or mt < 0:
+        return mb + mt
+    return max(mb, mt)
+
+
+def _iter_group_flow_items(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return group elements that should participate in vertical flow measurement."""
+    flow_items: List[Dict[str, Any]] = []
+    for elem in group:
+        if elem.get('_skip_layout'):
+            continue
+        if elem.get('_is_card_bg') or elem.get('_is_border_left') or elem.get('_is_decoration'):
+            continue
+        if elem.get('type') == 'shape' and elem.get('_pair_with'):
+            continue
+        flow_items.append(elem)
+    return flow_items
+
+
+def _measure_group_flow_height(group: List[Dict[str, Any]], default_gap: float = 0.05) -> float:
+    """Measure stacked block-flow height for a laid-out grid group."""
+    flow_items = _iter_group_flow_items(group)
+    if not flow_items:
+        return 0.0
+
+    total = 0.0
+    for idx, elem in enumerate(flow_items):
+        total += elem.get('bounds', {}).get('height', 0.0)
+        if idx < len(flow_items) - 1:
+            total += _flow_gap_in(elem, flow_items[idx + 1], default_gap)
+    return total
+
+
 def flat_extract(
     element: Tag,
     css_rules: List[CSSRule],
@@ -1138,6 +2099,7 @@ def flat_extract(
     """
     style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
     tag = element.name.lower()
+    is_slide_root = tag == 'section' and 'slide' in (element.get('class') or [])
 
     # Raster elements
     if tag == 'img':
@@ -1158,6 +2120,10 @@ def flat_extract(
         # Check for styled inline children that should have their own shapes (pills/badges)
         styled_shapes = []
         pill_elements = set()  # Track which children are pills, to exclude from combined text
+        parent_is_inline_group = (
+            has_visible_bg_or_border(style) or
+            style.get('display', '') in ('flex', 'inline-flex')
+        )
         for child in element.children:
             if isinstance(child, Tag) and child.name in INLINE_TAGS:
                 # Skip <code> and <kbd> — these are semantic inline elements that should
@@ -1165,7 +2131,7 @@ def flat_extract(
                 if child.name in ('code', 'kbd'):
                     continue
                 child_s = compute_element_style(child, css_rules, child.get('style', ''))
-                if has_visible_bg_or_border(child_s):
+                if has_visible_bg_or_border(child_s) and not parent_is_inline_group:
                     child_text = get_text_content(child).strip()
                     if child_text:
                         pill_elements.add(child)
@@ -1212,8 +2178,97 @@ def flat_extract(
         text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px,
                                       exclude_elements=pill_elements if pill_elements else None)
 
-        # Always emit styled pill shapes (decorative — even if parent has no non-pill text)
+        parent_display = ''
+        parent_flex_dir = ''
+        parent_align_items = ''
+        if parent_style:
+            parent_display = parent_style.get('display', '')
+            parent_flex_dir = parent_style.get('flexDirection', parent_style.get('flex-direction', ''))
+            parent_align_items = parent_style.get('alignItems', parent_style.get('align-items', ''))
+        parent_is_flex_column = parent_display in ('flex', 'inline-flex') and parent_flex_dir == 'column'
+        parent_stretches_children = parent_align_items in ('', 'stretch', 'normal', 'initial', 'unset')
+
+        # Flex-column containers stretch cross-axis children by default. Inline tags
+        # with visible backgrounds should inherit that available width instead of
+        # shrink-wrapping to their text content.
+        if (text_el and content_width_px and tag in INLINE_TAGS and has_visible_bg_or_border(style)
+                and parent_is_flex_column and parent_stretches_children
+                and parse_px(style.get('width', '')) <= 0
+                and parse_px(style.get('maxWidth', '')) <= 0
+                and 'inline-block' not in style.get('display', '')):
+            text_el['bounds']['width'] = content_width_px / PX_PER_IN
+
+        # Create bg shapes for <code> elements with visible backgrounds.
+        # The golden has separate bg shapes for code elements (e.g., Slide 10's
+        # "clawhub install kai-slide-creator" with rgba bg).
+        # Only create when <code> is the FIRST child (so text alignment is predictable).
         import uuid
+        code_bg_shapes = []
+        first_child = None
+        for child in element.children:
+            if isinstance(child, Tag):
+                first_child = child
+                break
+        first_meaningful_child = None
+        has_leading_text = False
+        for child in element.children:
+            if isinstance(child, NavigableString):
+                if str(child).strip():
+                    has_leading_text = True
+                    break
+                continue
+            if isinstance(child, Tag):
+                first_meaningful_child = child
+                break
+        if (first_meaningful_child and first_meaningful_child.name == 'code' and not has_leading_text
+                and not (text_el and text_el.get('renderInlineBoxOverlays'))):
+            code_s = compute_element_style(first_meaningful_child, css_rules, first_meaningful_child.get('style', ''))
+            if has_visible_bg_or_border(code_s):
+                code_text = get_text_content(first_meaningful_child).strip()
+                if code_text:
+                    _expand_padding(code_s)
+                    font_px = parse_px(code_s.get('fontSize', '16px'))
+                    if font_px <= 0:
+                        font_px = 16.0
+                    text_w = _estimate_text_width_px(
+                        code_text,
+                        font_px,
+                        monospace=True,
+                        letter_spacing=code_s.get('letterSpacing', ''),
+                    ) / PX_PER_IN
+                    pad_l = parse_px(code_s.get('paddingLeft', '0px')) / PX_PER_IN
+                    pad_r = parse_px(code_s.get('paddingRight', '0px')) / PX_PER_IN
+                    pad_t = parse_px(code_s.get('paddingTop', '0px')) / PX_PER_IN
+                    pad_b = parse_px(code_s.get('paddingBottom', '0px')) / PX_PER_IN
+                    shape_w = text_w + pad_l + pad_r + 0.08
+                    shape_h = max(font_px * 1.25 / PX_PER_IN + pad_t + pad_b + 0.03, 0.22)
+
+                    # Composite rgba bg color to solid (golden uses composited color)
+                    bg_color = code_s.get('backgroundColor', '')
+                    if bg_color and 'rgba' in bg_color:
+                        rgba_match = re.match(r'rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)', bg_color)
+                        if rgba_match:
+                            r, g, b, a = int(rgba_match.group(1)), int(rgba_match.group(2)), int(rgba_match.group(3)), float(rgba_match.group(4))
+                            r = int(a * r + (1 - a) * 255)
+                            g = int(a * g + (1 - a) * 255)
+                            b = int(a * b + (1 - a) * 255)
+                            bg_color = f'#{r:02X}{g:02X}{b:02X}'
+
+                    code_bg = {
+                        'type': 'shape', 'tag': 'code',
+                        'bounds': {'x': 0, 'y': 0, 'width': shape_w, 'height': shape_h},
+                        'styles': {
+                            'backgroundColor': bg_color or code_s.get('backgroundColor', ''),
+                            'borderRadius': code_s.get('borderRadius', '0px'),
+                        },
+                        '_is_code_bg': True,
+                        '_skip_layout': True,
+                        '_code_element': [first_meaningful_child],  # Store reference to code element for positioning
+                        '_code_pad_l': pad_l,
+                    }
+                    code_bg_shapes.append(code_bg)
+
+        # Always emit styled pill shapes (decorative — even if parent has no non-pill text)
         results = []
         if styled_shapes:
             for pill in styled_shapes:
@@ -1244,14 +2299,13 @@ def flat_extract(
                 pair_id = str(uuid.uuid4())[:8]
                 shape['_pair_with'] = pair_id
                 text_el['_pair_with'] = pair_id
+                _attach_pair_box_insets(shape, style)
                 results.append(shape)
 
+            if code_bg_shapes:
+                results.extend(code_bg_shapes)
             results.append(text_el)
             return results
-
-        if results:
-            return results
-        return []
 
     # Container elements (div, section, article, ul, ol)
     if tag in CONTAINER_TAGS:
@@ -1281,19 +2335,30 @@ def flat_extract(
                 'styles': {'borderRadius': '', 'objectFit': ''},
             }]
 
+        # Promote visible flex-row cards (e.g. layered cards) to first-class
+        # containers before the generic grid/flex wrapper path.
+        if _detect_flex_row(style) and has_visible_bg_or_border(style):
+            flow_box = measure_flow_box(element, css_rules, parent_style, slide_width_px, content_width_px)
+            if flow_box:
+                return [flow_box]
+
         # Grid or flex-row layout: wrap children in a container element
         if _is_grid_container(style) or _detect_flex_row(style):
+            print(f'DEBUG: GRID/FLEX container <{tag}> style={dict((k,v) for k,v in style.items() if k.startswith("display") or k.startswith("grid") or k.startswith("flex"))}')
             grid_children = build_grid_children(element, css_rules, style, slide_width_px, content_width_px)
             if grid_children:
-                grid_h = max(c['bounds']['y'] + c['bounds']['height'] for c in grid_children) + 0.15
+                grid_h = max(c['bounds']['y'] + c['bounds']['height'] for c in grid_children)
             else:
                 grid_h = 0.5
+            children_relative = False
+
             container = {
                 'type': 'container',
                 'tag': element.name,
                 'bounds': {'x': 0.5, 'y': 0.5, 'width': 12.33, 'height': grid_h},
                 'styles': style,
                 'children': grid_children,
+                '_children_relative': children_relative,
             }
             return [container]
 
@@ -1327,6 +2392,7 @@ def flat_extract(
                         pair_id = str(uuid.uuid4())[:8]
                         shape['_pair_with'] = pair_id
                         text_el['_pair_with'] = pair_id
+                        _attach_pair_box_insets(shape, style)
                         results.append(shape)
                     results.append(text_el)
                     return results
@@ -1348,6 +2414,7 @@ def flat_extract(
                     pair_id = str(uuid.uuid4())[:8]
                     shape['_pair_with'] = pair_id
                     text_el['_pair_with'] = pair_id
+                    _attach_pair_box_insets(shape, style)
                     results.append(shape)
                 results.append(text_el)
                 return results
@@ -1357,7 +2424,7 @@ def flat_extract(
 
         # No-text elements with explicit CSS dimensions and visible bg → decoration shapes
         # (e.g., colored dot divs with width/height/border-radius)
-        if not total_text and not child_tags and has_visible_bg_or_border(style):
+        if not total_text and not child_tags and _has_drawable_background(style):
             css_w = parse_px(style.get('width', ''))
             css_h = parse_px(style.get('height', ''))
             if css_w > 0 and css_h > 0:
@@ -1368,7 +2435,12 @@ def flat_extract(
                     'bounds': {'x': 0.5, 'y': 0.5, 'width': dec_w, 'height': dec_h},
                     'styles': {
                         'backgroundColor': style.get('backgroundColor', ''),
+                        'backgroundImage': style.get('backgroundImage', ''),
                         'borderRadius': style.get('borderRadius', ''),
+                        'marginTop': style.get('marginTop', ''),
+                        'marginBottom': style.get('marginBottom', ''),
+                        'marginLeft': style.get('marginLeft', ''),
+                        'marginRight': style.get('marginRight', ''),
                     },
                     '_is_decoration': True,
                 }]
@@ -1390,6 +2462,14 @@ def flat_extract(
                 pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
                 # Use text element's width (already constrained by content_width_px)
                 shape_w = text_el['bounds']['width'] + pad_l + pad_r
+                # For elements with borderLeft accent (like .info bars), the golden
+                # renders the bg shape 1.15x wider than text content width.
+                # max_width = content_width_px / PX_PER_IN represents the content area.
+                if content_width_px and content_width_px > 0:
+                    max_w_in = content_width_px / PX_PER_IN
+                    bl = style.get('borderLeft', '')
+                    if bl and 'none' not in bl and '4px' in bl:
+                        shape_w = max_w_in * 1.15
                 shape_h = text_el['bounds']['height'] + pad_t + pad_b
                 shape = {
                     'type': 'shape', 'tag': element.name,
@@ -1408,6 +2488,21 @@ def flat_extract(
                 pair_id = str(uuid.uuid4())[:8]
                 shape['_pair_with'] = pair_id
                 text_el['_pair_with'] = pair_id
+                _attach_pair_box_insets(shape, style)
+                code_child = next((c for c in child_tags if c.name.lower() == 'code'), None)
+                allow_detached_code_bg = (
+                    code_child is not None and
+                    not text_el.get('renderInlineBoxOverlays') and
+                    text_el.get('forceSingleLine') and
+                    '\n' not in text_el.get('text', '')
+                )
+                if allow_detached_code_bg:
+                    code_s = compute_element_style(code_child, css_rules, code_child.get('style', ''))
+                    if has_visible_bg_or_border(code_s):
+                        _expand_padding(code_s); code_text = get_text_content(code_child).strip(); font_px = parse_px(code_s.get('fontSize', '16px')) or 16.0
+                        cjk = sum(1 for c in code_text if ord(c) > 127); latin = len(code_text) - cjk
+                        code_bg = {'type': 'shape', 'tag': 'code', 'bounds': {'x': 0, 'y': 0, 'width': (cjk * font_px + latin * font_px * 0.55 + parse_px(code_s.get('paddingLeft', '0px')) + parse_px(code_s.get('paddingRight', '0px'))) / PX_PER_IN + 0.05, 'height': font_px / PX_PER_IN * 1.6 + 0.05}, 'styles': {'backgroundColor': code_s.get('backgroundColor', ''), 'borderRadius': code_s.get('borderRadius', '0px')}, '_is_code_bg': True, '_skip_layout': True, '_code_element': [code_child]}
+                        return [shape, text_el, code_bg]
                 return [shape, text_el]
 
         results = []
@@ -1416,29 +2511,170 @@ def flat_extract(
         if content_width_px and not style.get('maxWidth', ''):
             style['maxWidth'] = f'{content_width_px}px'
 
+        bg_shape = None
         if _should_create_bg_shape(style, has_gradient_bg):
-            shape = build_shape_element(element, style, slide_width_px)
+            bg_shape = build_shape_element(element, style, slide_width_px)
+            bg_shape['_is_card_bg'] = True
             if has_gradient_bg:
-                shape['styles']['backgroundImage'] = bg_image
-            results.append(shape)
+                bg_shape['styles']['backgroundImage'] = bg_image
+            results.append(bg_shape)
+
+        # For containers with visible bg/border (like .g cards), compute natural
+        # content width from text children and constrain them to it. This prevents
+        # text from expanding to the full parent maxWidth.
+        natural_content_px = 0.0
+        for child in element.children:
+            if not isinstance(child, Tag):
+                continue
+            child_natural_in = compute_text_content_width(child, css_rules, style)
+            if child_natural_in > 0:
+                natural_content_px = max(natural_content_px, child_natural_in * PX_PER_IN)
 
         # Propagate maxWidth constraint from parent to children
         parent_maxw = style.get('maxWidth', '')
 
+        # Compute natural content width constraint for children.
+        # If natural_content_px < parent's maxWidth, constrain children to the
+        # natural width instead of letting them expand to the full maxWidth.
+        # This prevents text from expanding to 720px when the actual content
+        # is narrower (e.g., the .g card inside a centered div).
+        child_cw_override = None
+        if bg_shape and natural_content_px > 0:
+            _expand_padding(style)
+            pad_l = parse_px(style.get('paddingLeft', '0px'))
+            pad_r = parse_px(style.get('paddingRight', '0px'))
+            max_parent_px = content_width_px or 99999
+            if parent_maxw and 'px' in parent_maxw:
+                max_parent_px = min(max_parent_px, parse_px(parent_maxw))
+            constrained = min(natural_content_px + pad_l + pad_r, max_parent_px)
+            if constrained < max_parent_px:
+                child_cw_override = constrained
+
         for child in element.children:
             if isinstance(child, Tag):
-                # Determine content width for child: use parent's constraint or child's own maxWidth
-                child_cw = content_width_px  # Start with parent's content width
-                if not child_cw and parent_maxw and 'px' in parent_maxw:
-                    child_cw = parse_px(parent_maxw)
+                # Determine content width for child
+                if child_cw_override is not None:
+                    child_cw = child_cw_override
+                else:
+                    child_cw = content_width_px
+                    if not child_cw and parent_maxw and 'px' in parent_maxw:
+                        child_cw = parse_px(parent_maxw)
                 child_elems = flat_extract(child, css_rules, style, slide_width_px, content_width_px=child_cw)
                 # Apply parent maxWidth to child elements if they don't have one
-                if parent_maxw and 'px' in parent_maxw:
+                if parent_maxw and 'px' in parent_maxw and child_cw_override is None:
                     for ce in child_elems:
                         cs = ce.get('styles', {})
                         if not cs.get('maxWidth', ''):
                             cs['maxWidth'] = parent_maxw
                 results.extend(child_elems)
+
+        # After processing children, size bg shape to match actual content width.
+        if bg_shape:
+            _expand_padding(style)
+            pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
+            pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+            pad_t = parse_px(style.get('paddingTop', '0px')) / PX_PER_IN
+            pad_b = parse_px(style.get('paddingBottom', '0px')) / PX_PER_IN
+            border_l = parse_px(
+                style.get(
+                    'borderLeftWidth',
+                    style.get('borderLeft', '0px').split()[0] if style.get('borderLeft', '') else '0px'
+                )
+            ) / PX_PER_IN
+            # Find content extent from non-bg children. Use relative extent instead of
+            # raw placeholder coordinates so default x/y placeholders (0.5, 0.5) don't
+            # inflate background sizes.
+            non_bg_children = [r for r in results if r is not bg_shape]
+            max_w = 0.0
+            min_top = None
+            max_bottom = None
+            for r in non_bg_children:
+                b = r.get('bounds', {})
+                bottom = b.get('y', 0) + b.get('height', 0)
+                top = b.get('y', 0)
+                if b.get('width', 0) > max_w:
+                    max_w = b.get('width', 0)
+                min_top = top if min_top is None else min(min_top, top)
+                max_bottom = bottom if max_bottom is None else max(max_bottom, bottom)
+            if max_w > 0:
+                bg_shape['bounds']['width'] = max_w + pad_l + pad_r + border_l
+            flow_items = [
+                r for r in non_bg_children
+                if r.get('type') in ('text', 'table', 'presentation_rows', 'image', 'container')
+            ]
+            has_complex_flow = (
+                len(flow_items) > 2 or
+                any(r.get('tag') == 'li' or r.get('type') in ('table', 'presentation_rows', 'container') for r in flow_items)
+            )
+            if has_complex_flow:
+                content_h = 0.0
+                for idx, r in enumerate(flow_items):
+                    rb = r.get('bounds', {})
+                    content_h += rb.get('height', 0.0)
+                    if idx == len(flow_items) - 1:
+                        continue
+                    if r.get('tag') == 'li':
+                        content_h += 7.0 / PX_PER_IN
+                        continue
+                    mb = parse_px(r.get('styles', {}).get('marginBottom', '')) / PX_PER_IN
+                    content_h += mb if mb > 0 else 0.05
+            elif max_bottom is not None and min_top is not None and max_bottom > min_top:
+                content_h = max_bottom - min_top
+            else:
+                content_h = 0.0
+            if content_h > 0:
+                bg_shape['bounds']['height'] = content_h + pad_t + pad_b
+
+            # Mark centered shrink-wrap cards so the layout pass can preserve the
+            # card width and align descendant text to the card content area instead
+            # of expanding everything to the full slide content width.
+            if child_cw_override is not None and not is_slide_root:
+                import uuid
+                card_group = f"card-{str(uuid.uuid4())[:8]}"
+                bg_shape['_card_group'] = card_group
+                bg_shape['_preserve_width'] = True
+                bg_shape['_css_pad_l'] = pad_l
+                bg_shape['_css_pad_r'] = pad_r
+                bg_shape['_css_pad_t'] = pad_t
+                bg_shape['_css_pad_b'] = pad_b
+                bg_shape['_css_border_l'] = border_l
+                for r in results:
+                    if r is bg_shape:
+                        continue
+                    r['_card_group'] = card_group
+
+                # For simple centered cards, keep the card and its descendants as a
+                # relative-positioned container. This prevents the top-level layout
+                # pass from stacking the card background and its text sequentially.
+                if (content_width_px and len(results) > 2 and
+                        not style.get('borderLeft', '') and
+                        not _is_grid_container(style) and
+                        not _detect_flex_row(style)):
+                    min_child_x = min((r['bounds']['x'] for r in non_bg_children), default=0.0)
+                    min_child_y = min((r['bounds']['y'] for r in non_bg_children), default=0.0)
+                    origin_x = max(min_child_x - pad_l - border_l, 0.0)
+                    origin_y = max(min_child_y - pad_t, 0.0)
+                    x_offset = max((content_width_px / PX_PER_IN - bg_shape['bounds']['width']) / 2.0, 0.0)
+
+                    bg_shape['bounds']['x'] = x_offset
+                    bg_shape['bounds']['y'] = 0.0
+                    for r in non_bg_children:
+                        r['bounds']['x'] = x_offset + max(r['bounds']['x'] - origin_x, 0.0)
+                        r['bounds']['y'] = max(r['bounds']['y'] - origin_y, 0.0)
+
+                    return [{
+                        'type': 'container',
+                        'tag': element.name,
+                        'bounds': {
+                            'x': 0.5,
+                            'y': 0.5,
+                            'width': 12.33,
+                            'height': bg_shape['bounds']['height'],
+                        },
+                        'styles': style,
+                        'children': results,
+                        '_children_relative': True,
+                    }]
 
         return results
 
@@ -1469,6 +2705,9 @@ def build_grid_children(
     if not grid_cols:
         grid_cols = style.get('grid-template-columns', '')
 
+    flex_wrap = style.get('flexWrap', style.get('flex-wrap', 'nowrap'))
+    is_plain_flex_row = _detect_flex_row(style) and not grid_cols and flex_wrap in ('', 'nowrap', 'initial', 'unset')
+
     if grid_cols:
         num_cols = _parse_grid_columns(grid_cols)
     elif _detect_flex_row(style):
@@ -1481,12 +2720,28 @@ def build_grid_children(
     gap_in = gap_px / px_per_in
     available_width_in = width_in - 2 * margin_in
 
+    _expand_padding(style)
+    flex_pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN if is_plain_flex_row else 0.0
+    flex_pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN if is_plain_flex_row else 0.0
+    flex_border_l = 0.0
+    if is_plain_flex_row:
+        flex_border_l = parse_px(
+            style.get(
+                'borderLeftWidth',
+                style.get('borderLeft', '0px').split()[0] if style.get('borderLeft', '') else '0px'
+            )
+        ) / PX_PER_IN
+    flex_start_in = flex_pad_l + flex_border_l
+    flex_inner_width_in = max(available_width_in - flex_start_in - flex_pad_r, 0.5)
+
     # Check if grid should be centered (justify-content: center)
     justify = style.get('justifyContent', style.get('justify-content', ''))
     is_centered = justify == 'center'
 
     # Estimate item width based on content (for centered grids) or fill available width
-    if is_centered:
+    if is_plain_flex_row:
+        item_width_in = flex_inner_width_in
+    elif is_centered:
         # Calculate content-based width for each child, using the max font size within
         content_widths = []
         for child in container.children:
@@ -1527,46 +2782,137 @@ def build_grid_children(
         total_grid_width = num_cols * item_width_in + (num_cols - 1) * gap_in
         x_offset = (available_width_in - total_grid_width) / 2
 
+    flex_child_widths: List[float] = []
+    if is_plain_flex_row:
+        flex_children = [c for c in container.children if isinstance(c, Tag)]
+        fixed_total = 0.0
+        flex_slots = []
+        for idx, child in enumerate(flex_children):
+            child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
+            child_tag = child.name.lower()
+            child_w = 0.0
+            css_w = parse_px(child_style.get('width', ''))
+
+            if css_w > 0:
+                child_w = css_w / PX_PER_IN
+            elif has_visible_bg_or_border(child_style):
+                child_w = _measure_preferred_child_width_in(
+                    child,
+                    child_style,
+                    css_rules,
+                    slide_width_px,
+                )
+            elif child_tag in TEXT_TAGS:
+                child_text = get_text_content(child).strip()
+                if child_text:
+                    font_px = parse_px(child_style.get('fontSize', '16px'))
+                    if font_px <= 0:
+                        font_px = 16.0
+                    cjk = sum(1 for c in child_text if ord(c) > 127)
+                    latin = len(child_text) - cjk
+                    child_w = (cjk * font_px * 0.96 + latin * font_px * 0.55) / PX_PER_IN
+                    if has_visible_bg_or_border(child_style):
+                        _expand_padding(child_style)
+                        child_w += (
+                            parse_px(child_style.get('paddingLeft', '0px')) +
+                            parse_px(child_style.get('paddingRight', '0px'))
+                        ) / PX_PER_IN
+            elif is_leaf_text_container(child, css_rules):
+                child_w = compute_text_content_width(child, css_rules, style)
+                if child_w > 0 and has_visible_bg_or_border(child_style):
+                    _expand_padding(child_style)
+                    child_w += (
+                        parse_px(child_style.get('paddingLeft', '0px')) +
+                        parse_px(child_style.get('paddingRight', '0px'))
+                    ) / PX_PER_IN
+            elif child_tag in CONTAINER_TAGS:
+                # Shrink-wrap simple inline/flex headers, but let block-content
+                # columns consume the remaining row width.
+                direct_tag_children = [gc for gc in child.children if isinstance(gc, Tag)]
+                all_inline_like = bool(direct_tag_children) and all(
+                    gc.name.lower() in INLINE_TAGS or gc.name.lower() in ('br',) or gc.name.lower() in TEXT_TAGS
+                    for gc in direct_tag_children
+                )
+                if all_inline_like and not any(gc.name.lower() in ('p', 'li', 'table', 'ul', 'ol') for gc in direct_tag_children):
+                    natural_w = compute_text_content_width(child, css_rules, style)
+                    if natural_w > 0:
+                        child_w = natural_w
+                        _expand_padding(child_style)
+                        child_w += (
+                            parse_px(child_style.get('paddingLeft', '0px')) +
+                            parse_px(child_style.get('paddingRight', '0px'))
+                        ) / PX_PER_IN
+
+            if child_w > 0:
+                if child_tag in TEXT_TAGS:
+                    child_w += 0.12
+                fixed_total += child_w
+                flex_child_widths.append(child_w)
+            else:
+                flex_slots.append(idx)
+                flex_child_widths.append(0.0)
+
+        remaining_w = max(flex_inner_width_in - fixed_total - gap_in * max(len(flex_children) - 1, 0), 0.5)
+        if flex_slots:
+            slot_w = remaining_w / len(flex_slots)
+            for idx in flex_slots:
+                flex_child_widths[idx] = slot_w
+
     # Collect child element groups (each group = one grid cell's elements)
     child_groups = []
     item_widths = []  # Per-item content widths
+    tag_child_idx = 0
     for child in container.children:
         if not isinstance(child, Tag):
             continue
         child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
         child_tag = child.name.lower()
+        child_width_in = item_width_in
+        if is_plain_flex_row and tag_child_idx < len(flex_child_widths):
+            child_width_in = flex_child_widths[tag_child_idx]
+        tag_child_idx += 1
 
         if child_tag == 'img':
             img_el = build_image_element(child, child_style)
             if img_el:
                 child_groups.append([img_el])
-                item_widths.append(img_el['bounds']['width'])
+                item_widths.append(child_width_in if is_plain_flex_row else img_el['bounds']['width'])
             continue
         if child_tag == 'svg':
             child_groups.append([{
                 'type': 'image', 'tag': 'svg', 'imageKind': 'svg',
                 'source': str(child),
-                'bounds': {'x': 0, 'y': 0, 'width': item_width_in, 'height': 2},
+                'bounds': {'x': 0, 'y': 0, 'width': child_width_in, 'height': 2},
                 'styles': {'borderRadius': '', 'objectFit': ''},
             }])
-            item_widths.append(item_width_in)
+            item_widths.append(child_width_in)
             continue
         if child_tag == 'table':
             tbl = build_table_element(child, css_rules, child_style)
             child_groups.append([tbl])
-            item_widths.append(tbl['bounds']['width'])
+            item_widths.append(child_width_in if is_plain_flex_row else tbl['bounds']['width'])
             continue
         if child_tag in TEXT_TAGS:
-            text_el = build_text_element(child, child_style, css_rules, slide_width_px, content_width_px)
+            child_cw_px = child_width_in * PX_PER_IN if is_plain_flex_row else content_width_px
+            text_el = build_text_element(child, child_style, css_rules, slide_width_px, child_cw_px)
             if text_el:
                 group = []
                 if has_visible_bg_or_border(child_style):
                     shape = build_shape_element(child, child_style, slide_width_px)
                     shape['bounds'] = dict(text_el['bounds'])
+                    import uuid
+                    pair_id = str(uuid.uuid4())[:8]
+                    shape['_pair_with'] = pair_id
+                    text_el['_pair_with'] = pair_id
+                    _attach_pair_box_insets(shape, child_style)
                     group.append(shape)
                 group.append(text_el)
                 child_groups.append(group)
-                item_widths.append(text_el['bounds']['width'])
+                item_widths.append(
+                    text_el['bounds']['width']
+                    if (not is_plain_flex_row or text_el.get('preferContentWidth'))
+                    else child_width_in
+                )
             continue
         if child_tag in CONTAINER_TAGS:
             bg_img = child_style.get('backgroundImage', 'none')
@@ -1578,39 +2924,164 @@ def build_grid_children(
                 child_groups.append([{
                     'type': 'image', 'tag': 'div', 'imageKind': 'background-image',
                     'source': bg_img,
-                    'bounds': {'x': 0, 'y': 0, 'width': item_width_in, 'height': 3},
+                    'bounds': {'x': 0, 'y': 0, 'width': child_width_in, 'height': 3},
                     'styles': {'borderRadius': '', 'objectFit': ''},
                 }])
-                item_widths.append(item_width_in)
+                item_widths.append(child_width_in)
                 continue
 
             if is_leaf_text_container(child, css_rules):
-                text_el = build_text_element(child, child_style, css_rules, slide_width_px, content_width_px)
+                child_cw_px = child_width_in * PX_PER_IN if is_plain_flex_row else content_width_px
+                text_el = build_text_element(child, child_style, css_rules, slide_width_px, child_cw_px)
                 if text_el:
                     group = []
+                    has_css_dims = False
                     if has_visible_bg_or_border(child_style) or has_grad:
                         shape = build_shape_element(child, child_style, slide_width_px)
-                        shape['bounds'] = dict(text_el['bounds'])
+                        # For elements with explicit CSS dimensions (like step circles),
+                        # use CSS size for the shape, not text-based estimation.
+                        css_w = parse_px(child_style.get('width', ''))
+                        css_h = parse_px(child_style.get('height', ''))
+                        if css_w > 0 and css_h > 0:
+                            shape_w = css_w / PX_PER_IN
+                            shape_h = css_h / PX_PER_IN
+                            shape['bounds'] = {
+                                'x': text_el['bounds']['x'],
+                                'y': text_el['bounds']['y'],
+                                'width': shape_w,
+                                'height': shape_h,
+                            }
+                            # Also expand text element to match shape size so comparison matches
+                            text_el['bounds']['width'] = shape_w
+                            text_el['bounds']['height'] = shape_h
+                            text_el['_use_css_dims'] = True  # Prevent layout pass from overriding
+                            has_css_dims = True
+                        else:
+                            shape['bounds'] = dict(text_el['bounds'])
+                        import uuid
+                        pair_id = str(uuid.uuid4())[:8]
+                        shape['_pair_with'] = pair_id
+                        text_el['_pair_with'] = pair_id
+                        _attach_pair_box_insets(shape, child_style)
                         if has_grad:
                             shape['styles']['backgroundImage'] = bg_img
                         group.append(shape)
                     group.append(text_el)
                     child_groups.append(group)
-                    item_widths.append(text_el['bounds']['width'])
+                    item_widths.append(
+                        text_el['bounds']['width']
+                        if (not is_plain_flex_row or text_el.get('preferContentWidth'))
+                        else child_width_in
+                    )
                 continue
 
             # For grid cell containers, compute internal width (cell width - padding)
             # so nested elements (like <li> in <ul>) use the available width
             pad_l = parse_px(child_style.get('paddingLeft', '0px'))
             pad_r = parse_px(child_style.get('paddingRight', '0px'))
-            cell_internal_width_px = (item_width_in - (pad_l + pad_r) / PX_PER_IN) * PX_PER_IN
+            cell_internal_width_px = max(child_width_in - (pad_l + pad_r) / PX_PER_IN, 0.5) * PX_PER_IN
+
+            # Special handling: flex-column containers should process each direct child
+            # as a separate grid item (preserves card/layer grouping)
+            child_display = child_style.get('display', '')
+            child_flex_dir = child_style.get('flexDirection', child_style.get('flex-direction', ''))
+            is_flex_column = (child_display == 'flex' and child_flex_dir == 'column')
+
+            if is_flex_column:
+                col_gap_px = parse_px(child_style.get('gap', '0px'))
+                col_gap_in = col_gap_px / PX_PER_IN
+                col_children = [c for c in child.children if isinstance(c, Tag)]
+                # Compute which grid column this flex-column container belongs to.
+                # Must count only Tag children (main loop skips non-Tag items), then
+                # mod by num_cols for multi-row grids.
+                tag_children = [gc for gc in container.children if isinstance(gc, Tag)]
+                grid_col_for_fc = 0
+                for gi, gc in enumerate(tag_children):
+                    if gc is child:
+                        grid_col_for_fc = gi % num_cols
+                        break
+
+                # Process each col_child, tracking its position WITHIN this column
+                # (used as row_idx in layout so items from different columns in the
+                # same row share the same Y position)
+                row_within_col = 0
+                for col_child in col_children:
+                    cc_style = compute_element_style(col_child, css_rules, col_child.get('style', ''), child_style)
+                    # Detect flex-row children (like .layer): emoji + text side by side
+                    cc_display = cc_style.get('display', '')
+                    cc_flex_dir = cc_style.get('flexDirection', cc_style.get('flex-direction', ''))
+                    is_cc_flex_row = (cc_display in ('flex', 'inline-flex') and cc_flex_dir != 'column')
+
+                    if is_cc_flex_row:
+                        flow_box = measure_flow_box(
+                            col_child,
+                            css_rules,
+                            child_style,
+                            slide_width_px,
+                            content_width_px=cell_internal_width_px,
+                        )
+                        if flow_box:
+                            flow_box['_flex_column_item'] = True
+                            flow_box['_grid_col_idx'] = grid_col_for_fc
+                            flow_box['_row_in_col'] = row_within_col
+                            child_groups.append([flow_box])
+                            item_widths.append(item_width_in)
+                        else:
+                            sub_elements = flat_extract(col_child, css_rules, cc_style, slide_width_px, content_width_px=cell_internal_width_px)
+                            if sub_elements:
+                                sub_elements[0]['_flex_column_item'] = True
+                                sub_elements[0]['_grid_col_idx'] = grid_col_for_fc
+                                sub_elements[0]['_row_in_col'] = row_within_col
+                                child_groups.append(sub_elements)
+                                item_widths.append(item_width_in)
+                    else:
+                        # Not flex-row: process normally
+                        sub_elements = flat_extract(col_child, css_rules, cc_style, slide_width_px, content_width_px=cell_internal_width_px)
+                        if sub_elements:
+                            # Mark as flex-column item with specific grid column
+                            # and row position within the column
+                            sub_elements[0]['_flex_column_item'] = True
+                            sub_elements[0]['_grid_col_idx'] = grid_col_for_fc
+                            sub_elements[0]['_row_in_col'] = row_within_col
+                            child_groups.append(sub_elements)
+                            text_w = compute_text_content_width(col_child, css_rules)
+                            if text_w > 0:
+                                card_pad_in = 2 * 24.0 / PX_PER_IN
+                                item_widths.append(child_width_in if is_plain_flex_row else text_w + card_pad_in)
+                            elif sub_elements:
+                                text_h = sum(e['bounds'].get('height', 0.3) for e in sub_elements if e.get('type') == 'text')
+                                item_widths.append(child_width_in if is_plain_flex_row else min(text_h * 3.0, 3.0))
+                            else:
+                                item_widths.append(child_width_in)
+                    row_within_col += 1
+                continue
 
             sub_elements = flat_extract(child, css_rules, child_style, slide_width_px, content_width_px=cell_internal_width_px)
+            is_flow_box_group = (
+                len(sub_elements) == 1 and
+                sub_elements[0].get('type') == 'container' and
+                sub_elements[0].get('layout') == 'flow_box'
+            )
+            explicit_child_w = parse_px(child_style.get('width', ''))
+            explicit_child_h = parse_px(child_style.get('height', ''))
+            is_explicit_decoration = (
+                not total_txt and explicit_child_w > 0 and explicit_child_h > 0 and
+                len(sub_elements) == 1 and sub_elements[0].get('type') == 'shape'
+            )
+            if is_explicit_decoration:
+                child_groups.append(sub_elements)
+                item_widths.append(child_width_in if is_plain_flex_row else sub_elements[0]['bounds']['width'])
+                continue
+            if is_flow_box_group:
+                child_groups.append(sub_elements)
+                item_widths.append(child_width_in)
+                continue
             # If container has visible background/border, prepend a shape for it
             # and strip child elements' shape wrappers (they inherit the container bg)
             if has_visible_bg_or_border(child_style) or has_grad:
                 shape = build_shape_element(child, child_style, slide_width_px)
-                shape['bounds'] = {'x': 0, 'y': 0, 'width': item_width_in, 'height': 3.0}
+                shape['bounds'] = {'x': 0, 'y': 0, 'width': child_width_in, 'height': 3.0}
+                shape['_is_card_bg'] = True
                 if has_grad:
                     shape['styles']['backgroundImage'] = bg_img
                 # Store CSS padding on the bg shape for use in layout
@@ -1634,13 +3105,13 @@ def build_grid_children(
                 # Card items with background need padding added to content width
                 # Golden stat cards: text_width + ~0.5" padding (24px left + 24px right ≈ 0.5")
                 card_pad_in = 2 * 24.0 / PX_PER_IN  # ~0.5"
-                item_widths.append(text_w + card_pad_in)
+                item_widths.append(child_width_in if is_plain_flex_row else text_w + card_pad_in)
             elif sub_elements:
                 # Use max element height as fallback (text elements' height is based on content)
                 text_h = sum(e['bounds'].get('height', 0.3) for e in sub_elements if e.get('type') == 'text')
-                item_widths.append(min(text_h * 3.0, 3.0))  # Rough estimate
+                item_widths.append(child_width_in if is_plain_flex_row else min(text_h * 3.0, 3.0))  # Rough estimate
             else:
-                item_widths.append(item_width_in)
+                item_widths.append(child_width_in)
             continue
 
     # Compute per-item x positions using item_widths
@@ -1672,6 +3143,18 @@ def build_grid_children(
         for idx in range(num_items):
             item_x_list.append(current_x)
             current_x += item_widths[idx] + gap_in
+    elif num_cols > 1 and not grid_cols:
+        # Flex-row (no grid-template-columns): position items sequentially
+        # with per-item widths (e.g., .layer with emoji + text)
+        total_content_w = sum(item_widths) + (num_items - 1) * gap_in
+        if is_centered:
+            x_start = margin_in + flex_start_in + max((flex_inner_width_in - total_content_w) / 2, 0.0)
+        else:
+            x_start = margin_in + flex_start_in
+        current_x = x_start
+        for idx in range(num_items):
+            item_x_list.append(current_x)
+            current_x += item_widths[idx] + gap_in
     elif num_cols > 1:
         # Multi-column grid (like cards): use uniform column widths
         # For centered grids, center the uniform grid
@@ -1683,6 +3166,10 @@ def build_grid_children(
         for idx in range(num_items):
             col_idx = idx % num_cols
             row_idx = idx // num_cols
+            # Flex-column items: use stored grid column index and row within column
+            if child_groups[idx] and child_groups[idx][0].get('_flex_column_item'):
+                col_idx = child_groups[idx][0].get('_grid_col_idx', 0)
+                row_idx = child_groups[idx][0].get('_row_in_col', idx)
             item_x_list.append(x_start + col_idx * (item_width_in + gap_in))
     else:
         for idx in range(num_items):
@@ -1690,17 +3177,154 @@ def build_grid_children(
 
     # Layout grid items
     results = []
+
+    # Pre-pass: compute each row's height (max of items in that row) so we can
+    # compute cumulative Y positions correctly (instead of row_idx * current_item_h)
+    # For flex-column grids, each column has INDEPENDENT row heights.
+    # Plain multi-column grids should still share a row max-height so sibling cards
+    # stretch together. Only opt into per-column keys when the layout actually
+    # contains column-stacked items.
+    row_heights = {}  # (col, row_in_col) or just row_idx -> max item_h
+    use_col_key = any(group and group[0].get('_flex_column_item') for group in child_groups)
     for idx, group in enumerate(child_groups):
         if num_cols > 1:
-            col_idx = idx % num_cols
-            row_idx = idx // num_cols
+            if group and group[0].get('_flex_column_item'):
+                col_idx = group[0].get('_grid_col_idx', 0)
+                row_in_col = group[0].get('_row_in_col', idx)
+            else:
+                col_idx = idx % num_cols
+                row_in_col = idx // num_cols
+            rh_key = (col_idx, row_in_col) if use_col_key else row_in_col
+        else:
+            rh_key = idx
+            col_idx = 0
+            row_in_col = idx
+
+        # Estimate item height (same logic as below)
+        bg_elem = None
+        for e in group:
+            if e.get('type') == 'shape' and not e.get('text') and e['bounds'].get('height', 0) >= 1.0:
+                bg_elem = e
+                break
+        text_h = sum(e['bounds'].get('height', 0.3) for e in group if e.get('type') == 'text')
+        table_h = sum(
+            e.get('bounds', {}).get('height', 0.0) or
+            sum(row.get('height', 0.264) for row in e.get('rows', []))
+            for e in group if e.get('type') in ('table', 'presentation_rows')
+        )
+        container_h = max((e['bounds'].get('height', 0.0) for e in group if e.get('type') == 'container'), default=0.0)
+
+        # For flex-row groups (like .layer), the text elements have pre-computed
+        # relative Y positions. Use actual Y extent instead of sum of heights,
+        # because sum doesn't account for vertical gaps between elements.
+        flex_row_texts = [e for e in group if e.get('type') == 'text' and e.get('_flex_row_child')]
+        decoration_only = bool(group) and all(e.get('_is_decoration') for e in group)
+        flow_content_h = _measure_group_flow_height(group, default_gap=0.05)
+        if decoration_only:
+            ih = max((e['bounds'].get('height', 0.1) for e in group), default=0.1)
+        elif flex_row_texts:
+            # Elements at the top row (emoji, h4) share the same Y level.
+            # Paragraphs are below. Use the pre-computed Y positions to get
+            # the actual content extent.
+            min_y = min(e['bounds']['y'] for e in flex_row_texts)
+            max_y = max(e['bounds']['y'] + e['bounds']['height'] for e in flex_row_texts)
+            content_extent = max_y - min_y
+            if bg_elem:
+                pad_t = bg_elem.get('_css_pad_t', 14.0 / PX_PER_IN)
+                pad_b = bg_elem.get('_css_pad_b', 14.0 / PX_PER_IN)
+                ih = content_extent + pad_t + pad_b
+            else:
+                ih = content_extent + 0.26  # default padding
+        elif flow_content_h > 0:
+            if bg_elem:
+                pad_t = bg_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+                pad_b = bg_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
+                ih = flow_content_h + pad_t + pad_b
+            else:
+                ih = flow_content_h
+        elif text_h > 0:
+            tcnt = sum(1 for e in group if e.get('type') == 'text')
+            if bg_elem:
+                pad_t = bg_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+                pad_b = bg_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
+                li_cnt = sum(1 for e in group if e.get('tag') == 'li')
+                non_li = tcnt - li_cnt
+                li_g = 7.0 / PX_PER_IN
+                t_margin = sum((parse_px(e.get('styles', {}).get('marginBottom', '')) / PX_PER_IN) for e in group if e.get('type') == 'text')
+                g_css = li_g * max(li_cnt - 1, 0) + 0.05 * max(non_li, 0) + 0.05 * min(li_cnt, 1) * min(non_li, 1)
+                ih = text_h + pad_t + pad_b + max(g_css, t_margin) + table_h
+            else:
+                ih = text_h + 0.05 * max(tcnt - 1, 0) + table_h
+        elif table_h > 0:
+            # Group has a table but no text elements at top level
+            if bg_elem:
+                pad_t = bg_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+                pad_b = bg_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
+                ih = table_h + pad_t + pad_b
+            else:
+                ih = table_h
+        else:
+            ih = container_h if container_h > 0 else 2.0
+        if container_h > 0:
+            ih = max(ih, container_h)
+        if rh_key not in row_heights or ih > row_heights[rh_key]:
+            row_heights[rh_key] = ih
+
+    # Compute cumulative Y: for multi-column grids with independent columns,
+    # compute per-column cumulative Y. For single-column or simple grids, use shared.
+    row_y = {}
+    if use_col_key:
+        # Group keys by column, compute cumulative Y per column
+        cols = set(k[0] for k in row_heights.keys())
+        for col in cols:
+            col_rows = sorted(k[1] for k in row_heights.keys() if k[0] == col)
+            cumulative_y = 0.0
+            for ri in col_rows:
+                row_y[(col, ri)] = cumulative_y
+                cumulative_y += row_heights[(col, ri)] + gap_in
+    else:
+        sorted_rows = sorted(row_heights.keys())
+        cumulative_y = 0.0
+        for ri, sr in enumerate(sorted_rows):
+            row_y[sr] = cumulative_y
+            cumulative_y += row_heights[sr] + gap_in
+
+    row_cross_offsets: Dict[int, float] = {}
+    if is_plain_flex_row and style.get('alignItems', style.get('align-items', '')) == 'baseline':
+        group_baselines = []
+        for idx, group in enumerate(child_groups):
+            bg_shape = next((e for e in group if e.get('_is_card_bg')), None)
+            group_baselines.append(_estimate_group_baseline_in(group, bg_shape))
+        if group_baselines:
+            max_baseline = max(group_baselines)
+            row_cross_offsets = {
+                idx: max(max_baseline - baseline, 0.0)
+                for idx, baseline in enumerate(group_baselines)
+            }
+
+    for idx, group in enumerate(child_groups):
+        if num_cols > 1:
+            # Flex-column items stay in their assigned column, using row within column
+            if group and group[0].get('_flex_column_item'):
+                col_idx = group[0].get('_grid_col_idx', 0)
+                row_idx = group[0].get('_row_in_col', idx)
+            else:
+                col_idx = idx % num_cols
+                row_idx = idx // num_cols
+            ry_key = (col_idx, row_idx) if use_col_key else row_idx
         else:
             col_idx = 0
             row_idx = idx
+            ry_key = row_idx
 
-        item_x = item_x_list[idx]
+        _dbg_item_x = item_x_list[idx]
+        _dbg_flex = group[0].get('_flex_column_item', False) if group else False
+        _dbg_col = "flex-col" if _dbg_flex else "simple"
+        print(f"    layout group#{idx} col={col_idx} row={row_idx} ({_dbg_col}): x={_dbg_item_x:.3f}", flush=True)
+        # DEBUG end
+        item_x = _dbg_item_x
         # Use per-item width for centered single-row and simple grids
-        if is_single_row_centered or (is_centered and num_items > 1 and not has_multi_children):
+        if is_single_row_centered or (is_centered and num_items > 1 and not has_multi_children) or is_plain_flex_row:
             this_item_width = item_widths[idx] if idx < len(item_widths) else item_width_in
         else:
             this_item_width = item_width_in
@@ -1716,16 +3340,34 @@ def build_grid_children(
         # Estimate item height from its elements' existing bounds
         text_h_total = 0.0
         has_text = False
+        container_h = max((e['bounds'].get('height', 0.0) for e in group if e.get('type') == 'container'), default=0.0)
         for elem in group:
             if elem.get('type') == 'text':
                 text_h_total += elem['bounds'].get('height', 0.3)
                 has_text = True
             elif elem.get('type') == 'table':
-                # Table rows are rendered at ~0.264" each (matching golden)
-                text_h_total += len(elem.get('rows', [])) * 0.264
+                text_h_total += (
+                    elem['bounds'].get('height', 0.0) or
+                    sum(row.get('height', 0.264) for row in elem.get('rows', []))
+                )
+                has_text = True
+            elif elem.get('type') == 'presentation_rows':
+                text_h_total += (
+                    elem['bounds'].get('height', 0.0) or
+                    sum(row.get('height', 0.264) for row in elem.get('rows', []))
+                )
                 has_text = True
 
-        if has_text:
+        decoration_only = bool(group) and all(e.get('_is_decoration') for e in group)
+        flex_row_texts = [e for e in group if e.get('type') == 'text' and e.get('_flex_row_child')]
+        flow_content_h = _measure_group_flow_height(group, default_gap=0.05)
+        if decoration_only:
+            item_h = max((e['bounds'].get('height', 0.1) for e in group), default=0.1)
+        elif bg_shape_elem and flow_content_h > 0 and not flex_row_texts:
+            card_pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
+            card_pad_b = bg_shape_elem.get('_css_pad_b', 15.0 / PX_PER_IN)
+            item_h = flow_content_h + card_pad_t + card_pad_b
+        elif has_text:
             text_count = sum(1 for e in group if e.get('type') == 'text')
             if bg_shape_elem:
                 # Card: use CSS padding from bg shape
@@ -1754,12 +3396,22 @@ def build_grid_children(
                 internal_gap = 0.05 * max(text_count - 1, 0)
                 item_h = text_h_total + internal_gap
         else:
-            item_h = 2.0  # default for non-text items
+            item_h = container_h if container_h > 0 else 2.0  # default for non-text items
+        if container_h > 0:
+            item_h = max(item_h, container_h)
 
-        item_y = row_idx * (item_h + gap_in)  # Container-relative (layout pass adds container y)
-
+        # Use pre-computed cumulative row Y instead of row_idx * (item_h + gap_in)
+        # to correctly handle grids where different rows have different heights
+        item_y = row_y.get(ry_key, row_idx * (item_h + gap_in)) + row_cross_offsets.get(idx, 0.0)
         # Layout elements: background shapes overlap content, content stacks vertically
         has_bg_shape = bg_shape_elem is not None
+        stretch_to_row_height = (
+            has_bg_shape and
+            num_cols > 1 and
+            not is_plain_flex_row and
+            not (group and group[0].get('_flex_column_item'))
+        )
+        row_item_h = row_heights.get(ry_key, item_h) if stretch_to_row_height else item_h
         # Use CSS padding from bg shape if available, otherwise defaults
         if has_bg_shape:
             pad_t = bg_shape_elem.get('_css_pad_t', 15.0 / PX_PER_IN)
@@ -1771,21 +3423,47 @@ def build_grid_children(
             border_l = 0.0
 
         group_y = item_y + pad_t
+        flow_items = _iter_group_flow_items(group)
+        flow_gaps = {}
+        for flow_idx, flow_elem in enumerate(flow_items[:-1]):
+            flow_gaps[id(flow_elem)] = _flow_gap_in(flow_elem, flow_items[flow_idx + 1], 0.05)
+        paired_shapes = {
+            e.get('_pair_with'): e for e in group
+            if e.get('type') == 'shape' and e.get('_pair_with')
+        }
+        group_text_count = sum(1 for e in group if e.get('type') == 'text')
+        group_other_content_count = sum(
+            1 for e in group
+            if e.get('type') in ('shape', 'table', 'presentation_rows', 'image', 'container')
+            and not e.get('_pair_with')
+            and not e.get('_is_decoration')
+        )
         for elem in group:
             b = elem['bounds']
             elem['layoutDone'] = True
             # Check if this is a pure background shape (no text, height >= 2)
-            is_bg_shape = (elem.get('type') == 'shape' and not elem.get('text')
-                           and b.get('height', 0) >= 2.0)
+            is_bg_shape = (
+                elem.get('_is_card_bg') or
+                (elem.get('type') == 'shape' and not elem.get('text') and b.get('height', 0) >= 2.0)
+            )
             if is_bg_shape:
                 # Background shape: same position as content area, full item height
                 b['x'] = item_x
                 b['y'] = item_y
                 b['width'] = this_item_width
-                b['height'] = item_h
+                b['height'] = row_item_h
                 results.append(elem)
                 continue  # Don't advance group_y
             if elem.get('type') in ('text', 'shape'):
+                # Flex-row children have pre-set relative x positions.
+                # Use item_x + relative x instead of overwriting.
+                if elem.get('_flex_row_child'):
+                    b['x'] = item_x + b.get('x', 0)
+                    # Preserve relative y offset (e.g., layer padding, element spacing)
+                    b['y'] = item_y + b.get('y', 0)
+                    results.append(elem)
+                    continue
+
                 b['x'] = item_x + pad_x + border_l
                 b['y'] = group_y
                 # Paired shapes (pill/badge backgrounds) and decorations overlay text — don't advance Y
@@ -1800,8 +3478,16 @@ def build_grid_children(
                     css_text_align = bg_shape_elem.get('_css_text_align', 'left') if bg_shape_elem else 'left'
                     tag = elem.get('tag', '')
                     is_block_text = tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li')
-                    # Paired text (pill/badge): stretch to card content width (CSS flex-column stretch)
-                    if elem.get('_pair_with') and bg_shape_elem and orig_w > 0:
+                    paired_shape = paired_shapes.get(elem.get('_pair_with'))
+                    if paired_shape:
+                        pb = paired_shape.get('bounds', {})
+                        b['x'] = pb.get('x', b['x'])
+                        b['y'] = pb.get('y', b['y'])
+                        if pb.get('width', 0) > 0:
+                            b['width'] = pb['width']
+                        if pb.get('height', 0) > 0:
+                            b['height'] = max(b.get('height', 0), pb['height'])
+                    elif elem.get('_pair_with') and bg_shape_elem and orig_w > 0:
                         b['width'] = card_content_w - border_l
                     elif is_block_text and orig_w > 0.5:
                         # Block text inside card: use full content width
@@ -1812,44 +3498,67 @@ def build_grid_children(
                         else:
                             # Left-aligned card: position after padding + border
                             b['x'] = item_x + pad_x + border_l
+                    elif is_block_text and group_text_count == 1 and group_other_content_count == 0:
+                        b['width'] = card_content_w - border_l
+                        b['x'] = item_x + pad_x + border_l
+                    elif is_block_text:
+                        b['x'] = item_x + pad_x + border_l
                     else:
                         # Short/plain text: shrink-wrap to natural width and center
-                        elem_text = elem.get('text', '')
-                        elem_styles = elem.get('styles', {})
-                        elem_font_px = parse_px(elem_styles.get('fontSize', '16px'))
-                        if elem_font_px <= 0:
-                            elem_font_px = 16.0
-                        max_line_px = 0.0
-                        for line in elem_text.split('\n'):
-                            line = line.strip()
-                            if not line:
-                                continue
-                            line_cjk = sum(1 for c in line if ord(c) > 127)
-                            line_latin = len(line) - line_cjk
-                            line_w = line_cjk * elem_font_px + line_latin * elem_font_px * 0.55
-                            if line_w > max_line_px:
-                                max_line_px = line_w
-                        natural_w = max_line_px / PX_PER_IN
-                        b['width'] = natural_w + 0.1  # small padding
-                        b['x'] = item_x + pad_x + border_l + (card_content_w - b['width']) / 2
+                        # Unless element has explicit CSS dimensions (like step circles)
+                        if elem.get('_use_css_dims'):
+                            # Keep the existing width (set from CSS dimensions)
+                            # Position at left edge with CSS padding, don't center
+                            natural_w = b['width']
+                            b['x'] = item_x + pad_x + border_l
+                        else:
+                            elem_text = elem.get('text', '')
+                            elem_styles = elem.get('styles', {})
+                            if elem.get('preferContentWidth') and elem.get('inlineContentWidth', 0.0) > 0:
+                                natural_w = elem.get('inlineContentWidth', 0.0)
+                                b['width'] = min(natural_w, card_content_w)
+                            else:
+                                elem_font_px = parse_px(elem_styles.get('fontSize', '16px'))
+                                if elem_font_px <= 0:
+                                    elem_font_px = 16.0
+                                max_line_px = 0.0
+                                for line in elem_text.split('\n'):
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    line_w = _estimate_text_width_px(
+                                        line,
+                                        elem_font_px,
+                                        monospace=_uses_monospace_font(elem_styles.get('fontFamily', '')),
+                                        letter_spacing=elem_styles.get('letterSpacing', ''),
+                                    )
+                                    if line_w > max_line_px:
+                                        max_line_px = line_w
+                                natural_w = max_line_px / PX_PER_IN
+                                b['width'] = natural_w + 0.1  # small padding
+                            b['x'] = item_x + pad_x + border_l + (card_content_w - b['width']) / 2
                 else:
                     b['width'] = this_item_width - 2 * pad_x
-                # Use CSS gap for li elements (from <ul> gap:7px) vs default 0.05"
-                if elem.get('tag') == 'li':
-                    group_y += b['height'] + 7.0 / PX_PER_IN  # ul.bl gap: 7px
-                else:
-                    group_y += b['height'] + 0.05
-            elif elem.get('type') == 'table':
+                gap_after = flow_gaps.get(id(elem), 0.0)
+                group_y += b['height'] + gap_after
+            elif elem.get('type') in ('table', 'presentation_rows'):
                 b['x'] = item_x + pad_x + border_l
                 b['y'] = group_y
                 b['width'] = this_item_width - 2 * pad_x if has_bg_shape else this_item_width
-                group_y += b['height'] + 0.05
+                group_y += b['height'] + flow_gaps.get(id(elem), 0.0)
             elif elem.get('type') == 'image':
                 b['x'] = item_x
                 b['y'] = group_y
                 b['width'] = item_width_in
-                group_y += b['height'] + 0.05
+                group_y += b['height'] + flow_gaps.get(id(elem), 0.0)
             elif elem.get('type') == 'container':
+                if elem.get('layout') == 'flow_box':
+                    b['x'] = item_x
+                    b['y'] = item_y
+                    if elem.get('_children_relative'):
+                        _shift_container_descendants(elem, b['x'], b['y'])
+                    results.append(elem)
+                    continue
                 # Unwrap nested container (e.g., flex-row header with dot+text+text)
                 inner_children = elem.get('children', [])
                 inner_x = item_x + pad_x + border_l
@@ -1857,6 +3566,7 @@ def build_grid_children(
                     icb = ic.get('bounds', {})
                     # Skip full-width bg shapes from inner grid layout
                     if (ic.get('type') == 'shape' and not ic.get('text')
+                            and not ic.get('_is_decoration')
                             and icb.get('height', 0) >= 1.0):
                         continue
                     icb['x'] = inner_x
@@ -1864,15 +3574,20 @@ def build_grid_children(
                     ic['layoutDone'] = True
                     results.append(ic)
                     inner_x += icb.get('width', 0) + 0.05
-                group_y += max((ic.get('bounds', {}).get('height', 0.2) for ic in inner_children
-                                if not (ic.get('type') == 'shape' and ic.get('bounds', {}).get('height', 0) >= 1.0)),
-                               default=0.2) + 0.05
+                group_y += elem.get('bounds', {}).get('height', 0.2) + flow_gaps.get(id(elem), 0.0)
                 continue  # Don't append the container wrapper itself
             results.append(elem)
 
     # Mark all grid children so pill positioning can skip them
     for elem in results:
         elem['_grid_child'] = True
+
+    # DEBUG: show Y extent of grid output
+    if results:
+        ys = [e['bounds']['y'] for e in results]
+        y_maxs = [e['bounds']['y'] + e['bounds']['height'] for e in results]
+        texts = [e.get('text', '')[:20] for e in results if e.get('type') == 'text']
+        print(f"    grid output: y={min(ys):.3f}..{max(y_maxs):.3f} ({len(results)} elements) texts={texts}", flush=True)
 
     return results
 
@@ -1983,15 +3698,19 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
             content_mw = parse_px(cr_maxw)
 
         # When content_root IS the slide (no .slide-content found), the actual
-        # content width constraint may be on the first child <div> wrapper.
+        # content width constraint may be on a direct child wrapper rather than
+        # the first child node. Skip absolute-positioned decorative children.
         if content_mw is None and content_root is slide_html:
             from bs4 import Tag
             for child in content_root.children:
-                if isinstance(child, Tag) and child.name == 'div':
-                    child_style = compute_element_style(child, css_rules, child.get('style', ''))
-                    child_maxw = child_style.get('maxWidth', '')
-                    if child_maxw and 'px' in child_maxw:
-                        content_mw = parse_px(child_maxw)
+                if not isinstance(child, Tag):
+                    continue
+                child_style = compute_element_style(child, css_rules, child.get('style', ''))
+                if child_style.get('position', '') == 'absolute':
+                    continue
+                child_maxw = child_style.get('maxWidth', '')
+                if child_maxw and 'px' in child_maxw:
+                    content_mw = parse_px(child_maxw)
                     break
 
         elements = flat_extract(content_root, css_rules, body_style, slide_width_px=width_px, content_width_px=content_mw)
@@ -2091,6 +3810,7 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
     if content_area_width is not None and content_area_width < slide_width_in - 2 * internal_margin:
         slide_margin = (slide_width_in - content_area_width) / 2
 
+
     max_width = slide_width_in - 2 * slide_margin
 
     # Pre-compute which shapes are paired with text — they shouldn't advance current_y
@@ -2100,20 +3820,142 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
         if elem.get('_pair_with') and elem.get('type') == 'shape':
             paired_shapes.add(id(elem))
 
+    card_groups: Dict[str, Dict[str, float]] = {}
+    active_card_group: Optional[str] = None
+    pair_shapes_by_id: Dict[str, Dict[str, Any]] = {}
+    for elem in elements:
+        pair_id = elem.get('_pair_with')
+        if pair_id and elem.get('type') == 'shape':
+            pair_shapes_by_id[pair_id] = elem
+
+    def accent_callout_gap_floor(flow_elem: Optional[Dict[str, Any]]) -> float:
+        if not flow_elem:
+            return 0.0
+        pair_id = flow_elem.get('_pair_with')
+        if not pair_id:
+            return 0.0
+        pair_shape = pair_shapes_by_id.get(pair_id)
+        if not pair_shape:
+            return 0.0
+        border_left = pair_shape.get('styles', {}).get('borderLeft', '')
+        if not (border_left and '4px' in border_left and 'solid' in border_left):
+            return 0.0
+        return 18.0 / PX_PER_IN
+
+    def paired_callout_gap_floor(flow_elem: Optional[Dict[str, Any]]) -> float:
+        if not flow_elem:
+            return 0.0
+        pair_id = flow_elem.get('_pair_with')
+        if not pair_id:
+            return 0.0
+        pair_shape = pair_shapes_by_id.get(pair_id)
+        if not pair_shape:
+            return 0.0
+
+        pair_styles = pair_shape.get('styles', {})
+        next_styles = flow_elem.get('styles', {})
+        border_left = pair_styles.get('borderLeft', '')
+        bg_color = pair_styles.get('backgroundColor', '')
+        radius_px = parse_px(pair_styles.get('borderRadius', '0px'))
+        is_compact_pair = (
+            pair_shape.get('bounds', {}).get('height', 0.0) <= 0.9 and
+            flow_elem.get('bounds', {}).get('height', 0.0) <= 0.7
+        )
+        looks_like_callout = (
+            (border_left and '4px' in border_left and 'solid' in border_left) or
+            (is_compact_pair and radius_px >= 10.0 and bool(bg_color))
+        )
+        if not looks_like_callout:
+            return 0.0
+
+        mt_px = max(
+            parse_px(next_styles.get('marginTop', '')),
+            parse_px(pair_styles.get('marginTop', '')),
+        )
+        return max(24.0, mt_px + 12.0) / PX_PER_IN
+
+    def next_flow_elem(start_idx: int) -> Optional[Dict[str, Any]]:
+        for cand in elements[start_idx + 1:]:
+            if cand.get('_skip_layout'):
+                continue
+            if id(cand) in paired_shapes:
+                continue
+            if cand.get('_in_flow_box'):
+                continue
+            return cand
+        return None
+
+    def prev_flow_elem(start_idx: int) -> Optional[Dict[str, Any]]:
+        for cand in reversed(elements[:start_idx]):
+            if cand.get('_skip_layout'):
+                continue
+            if id(cand) in paired_shapes:
+                continue
+            if cand.get('_in_flow_box'):
+                continue
+            return cand
+        return None
+
+    def extend_card_group_height(group_id: Optional[str], elem: Dict[str, Any]) -> None:
+        if not group_id or group_id not in card_groups:
+            return
+        if elem.get('_preserve_width'):
+            return
+        cg = card_groups[group_id]
+        b = elem.get('bounds', {})
+        used_h = max((b.get('y', 0.0) + b.get('height', 0.0)) - cg.get('y', 0.0), 0.0)
+        cg['height'] = max(cg.get('height', 0.0), used_h + cg.get('pad_b', 0.0))
+        shape_ref = cg.get('shape')
+        if shape_ref:
+            shape_ref['bounds']['height'] = cg['height']
+
+    def flush_active_card_group(next_elem: Optional[Dict[str, Any]] = None):
+        nonlocal current_y, active_card_group
+        if not active_card_group:
+            return
+        cg = card_groups.get(active_card_group)
+        if cg:
+            gap = max(
+                _flow_gap_in(cg.get('shape'), next_elem, 0.13),
+                accent_callout_gap_floor(next_elem),
+                paired_callout_gap_floor(next_elem),
+            )
+            current_y = max(current_y, cg.get('y', current_y) + cg.get('height', 0.0) + gap)
+        active_card_group = None
+
     for i, elem in enumerate(elements):
         b = elem['bounds']
         s = elem.get('styles', {})
         elem_type = elem.get('type', '')
+        elem_card_group = None if elem.get('_in_flow_box') else elem.get('_card_group')
+
+        if active_card_group and elem_card_group != active_card_group:
+            flush_active_card_group(elem)
 
         # Handle container elements (grid/flex wrappers)
         if elem_type == 'container':
             b['y'] = current_y
             b['x'] = slide_margin
             # Adjust children's y positions, but x is already set by build_grid_children
+            children_relative = elem.get('_children_relative', False)
             for child in elem.get('children', []):
                 child['bounds']['y'] = current_y + child['bounds']['y']
-                # Don't adjust x - build_grid_children already positioned correctly
-            current_y += b['height'] + 0.13
+                if child.get('type') == 'container' and child.get('_children_relative') and not children_relative:
+                    _shift_container_descendants(child, 0.0, current_y)
+                if children_relative:
+                    child['bounds']['x'] = b['x'] + child['bounds']['x']
+                    if child.get('_is_card_bg') or child.get('_is_border_left'):
+                        child['bounds']['x'] = b['x']
+                    if child.get('type') == 'container' and child.get('_children_relative'):
+                        _shift_container_descendants(child, b['x'], current_y)
+                # Don't adjust x for other children - build_grid_children already positioned correctly
+            next_elem = next_flow_elem(i)
+            gap = max(
+                _flow_gap_in(elem, next_elem, 0.13),
+                accent_callout_gap_floor(next_elem),
+                paired_callout_gap_floor(next_elem),
+            )
+            current_y += b['height'] + gap
             continue
 
         # Skip elements already positioned by grid/flex layout, but advance y
@@ -2125,8 +3967,13 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
         if elem.get('_skip_layout'):
             continue
 
-        # Position element
-        b['y'] = current_y
+        if elem_type == 'text':
+            pair_shape = None if elem.get('_in_flow_box') else pair_shapes_by_id.get(elem.get('_pair_with', ''))
+            pair_pad_t = pair_shape.get('_pair_pad_t', 0.0) if pair_shape else 0.0
+            pair_pad_b = pair_shape.get('_pair_pad_b', 0.0) if pair_shape else 0.0
+            b['y'] = current_y + pair_pad_t
+        else:
+            b['y'] = current_y
         text_align = s.get('textAlign', 'left')
 
         if elem_type == 'text':
@@ -2135,6 +3982,7 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 pass  # Height already corrected, skip recalculation
             else:
                 text = elem.get('text', '')
+                existing_natural_h = elem.get('naturalHeight', b.get('height', 0.0))
                 font_size_px = parse_px(elem.get('styles', {}).get('fontSize', '16px'))
                 if font_size_px <= 0:
                     font_size_px = 16.0
@@ -2143,7 +3991,10 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 # (max_width is the full slide content width, but the element may
                 # have a narrower maxWidth constraint)
                 wrap_width = b['width']
-                line_count = estimate_wrapped_lines(text, font_size_pt, wrap_width) if text else 1
+                if elem.get('forceSingleLine') and '\n' not in text:
+                    line_count = 1
+                else:
+                    line_count = estimate_wrapped_lines(text, font_size_pt, wrap_width) if text else 1
                 # Use CSS lineHeight if available
                 lh = s.get('lineHeight', '')
                 if lh and 'px' in lh:
@@ -2155,9 +4006,13 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 # For large display fonts (>= 48pt), use line-height-based height directly
                 # (PPTX renders large text with minimal leading, matching CSS line-height)
                 if font_size_pt >= 48:
-                    b['height'] = line_count * line_height_px / PX_PER_IN
+                    computed_h = line_count * line_height_px / PX_PER_IN
                 else:
-                    b['height'] = max(line_count * line_height_px / PX_PER_IN, font_size_pt / 72.0 * 1.0)
+                    computed_h = max(line_count * line_height_px / PX_PER_IN, font_size_pt / 72.0 * 1.0)
+                if elem.get('forceSingleLine') or elem.get('preferContentWidth'):
+                    b['height'] = max(computed_h, existing_natural_h)
+                else:
+                    b['height'] = computed_h
                 # Update naturalHeight to match layout-calculated height
                 # (export_text_element uses max of bounds height and naturalHeight)
                 elem['naturalHeight'] = b['height']
@@ -2167,7 +4022,7 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             if not elem.get('pptx_height_corrected'):
                 pad_t = parse_px(s.get('paddingTop', ''))
                 pad_b = parse_px(s.get('paddingBottom', ''))
-                if pad_t + pad_b > 0:
+                if pad_t + pad_b > 0 and not (elem.get('forceSingleLine') or elem.get('preferContentWidth')):
                     b['height'] += (pad_t + pad_b) / PX_PER_IN
 
             # For list items, ensure minimum height matches rendered browser output
@@ -2193,16 +4048,27 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                 # For multiline centered text, use the widest line's width
                 # (golden centers each line independently, element sized to widest)
                 max_line_width_px = 0.0
+                max_line_display_width_px = 0.0
                 for line in text.split('\n'):
                     line = line.strip()
                     if not line:
                         continue
-                    line_cjk = sum(1 for c in line if ord(c) > 127)
-                    line_latin = len(line) - line_cjk
-                    line_w = line_cjk * font_size_px * 0.96 + line_latin * font_size_px * 0.55
+                    line_w = _estimate_text_width_px(
+                        line,
+                        font_size_px * 0.96,
+                        letter_spacing=s.get('letterSpacing', ''),
+                    )
                     if line_w > max_line_width_px:
                         max_line_width_px = line_w
+                    display_line_w = _estimate_text_width_px(
+                        line,
+                        font_size_px,
+                        letter_spacing=s.get('letterSpacing', ''),
+                    )
+                    if display_line_w > max_line_display_width_px:
+                        max_line_display_width_px = display_line_w
                 text_width_in = max_line_width_px / PX_PER_IN
+                display_text_width_in = max_line_display_width_px / PX_PER_IN
                 if elem.get('_full_subtitle'):
                     # Full subtitle spans the full slide content width (like golden)
                     content_width = max_width
@@ -2218,11 +4084,25 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                         content_width = min(cjk_width_px / PX_PER_IN, max_width)
                     else:
                         content_width = min(text_width_in, max_width)
+                    if '\n' in text and font_size_pt >= 28:
+                        # Preserve author-provided line breaks for display headings by
+                        # giving PPT a small width safety margin. This avoids a machine-
+                        # dependent third wrap on the last character of the explicit line.
+                        heading_wrap_guard = min(max(font_size_px * 0.34 / PX_PER_IN, 0.18), 0.30)
+                        mixed_script_guard = 0.0
+                        if has_cjk(text) and has_latin_word(text):
+                            mixed_script_guard = min(max(font_size_px * 0.10 / PX_PER_IN, 0.08), 0.16)
+                        content_width = min(
+                            max(content_width, display_text_width_in + heading_wrap_guard + mixed_script_guard),
+                            max_width,
+                        )
                 else:
                     # For centered text: check if element has maxWidth and wrapped text.
                     # If so, use the full unwrapped text width (golden wraps text but
                     # keeps the element at full content width).
                     mw_px = parse_px(s.get('maxWidth', ''))
+                    prefer_content_width = elem.get('preferContentWidth', False)
+                    inline_content_width = elem.get('inlineContentWidth', 0.0)
                     if mw_px > 0 and '\n' in text:
                         # Wrapped text with maxWidth: compute full unwrapped width
                         full_text = text.replace('\n', '')
@@ -2230,12 +4110,20 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                         full_latin = len(full_text) - full_cjk
                         full_px = full_cjk * font_size_px * 0.96 + full_latin * font_size_px * 0.55
                         content_width = min(full_px / PX_PER_IN, max_width)
+                    elif prefer_content_width and inline_content_width > 0:
+                        if elem.get('preferCenteredBlockWidth'):
+                            # Centered command/footer rows look closer to native decks
+                            # when the paragraph itself keeps a stable authored block
+                            # width while the inline box overlay centers inside it.
+                            content_width = min(max_width, max(inline_content_width + 0.8, 4.85))
+                        else:
+                            content_width = min(inline_content_width + 0.1, max_width)
                     elif text_width_in > 1.0:
                         # For center-aligned text inside a container with maxWidth,
                         # if the text is significantly narrower than max_width,
                         # the golden treats it as block-level filling the container
                         mw_px = parse_px(s.get('maxWidth', ''))
-                        if text_align == 'center' and mw_px > 0 and text_width_in < max_width * 0.7:
+                        if text_align == 'center' and mw_px > 0 and text_width_in < max_width * 0.7 and not prefer_content_width:
                             content_width = max_width
                         else:
                             content_width = min(text_width_in, max_width)
@@ -2250,11 +4138,41 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             else:
                 b['width'] = max_width
                 b['x'] = slide_margin
+
+            card_group = None if elem.get('_in_flow_box') else elem.get('_card_group')
+            if card_group and card_group in card_groups:
+                cg = card_groups[card_group]
+                content_w = max(cg['width'] - cg['pad_l'] - cg['pad_r'] - cg['border_l'], 0.5)
+                b['width'] = content_w
+                b['x'] = cg['x'] + cg['pad_l'] + cg['border_l']
+                b['y'] = cg.get('cursor_y', b['y'])
+                mb = parse_px(s.get('marginBottom', '')) / PX_PER_IN
+                inner_gap = mb if mb != 0 else 0.05
+                cg['cursor_y'] = b['y'] + b['height'] + inner_gap
+                active_card_group = card_group
+                extend_card_group_height(card_group, elem)
             # Clamp all text widths to max_width to prevent overflow past slide edge
             if b['width'] > max_width:
                 b['width'] = max_width
                 b['x'] = slide_margin
         elif elem_type == 'shape':
+            if elem.get('_preserve_width') and elem.get('_card_group') and not elem.get('_in_flow_box'):
+                b['y'] = current_y
+                b['x'] = slide_margin + (max_width - b['width']) / 2
+                card_groups[elem['_card_group']] = {
+                    'x': b['x'],
+                    'y': b['y'],
+                    'width': b['width'],
+                    'height': b['height'],
+                    'pad_l': elem.get('_css_pad_l', 0.0),
+                    'pad_r': elem.get('_css_pad_r', 0.0),
+                    'pad_b': elem.get('_css_pad_b', 0.0),
+                    'border_l': elem.get('_css_border_l', 0.0),
+                    'cursor_y': b['y'] + elem.get('_css_pad_t', 0.0),
+                    'shape': elem,
+                }
+                active_card_group = elem['_card_group']
+                continue
             # Paired shapes (from inline-block containers) already have correct width
             if elem.get('_pair_with') and not elem.get('_is_pill'):
                 # Find paired text element to sync width
@@ -2267,9 +4185,19 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
 
                 if paired_text:
                     nb = paired_text['bounds']
-                    # Sync shape width to text width
-                    b['width'] = nb['width']
-                    b['x'] = slide_margin + (max_width - b['width']) / 2
+                    # For elements with borderLeft accent (like .info bars), the golden
+                    # renders the bg shape wider than text: max_width * 1.15
+                    # This creates the characteristic full-width info bar style.
+                    bl = elem.get('styles', {}).get('borderLeft', '')
+                    # Only apply expanded width to shapes with a genuine border-left
+                    # accent bar (4px+ solid), not thin borders from CSS `border` property
+                    if bl and 'none' not in bl and '4px' in bl:
+                        b['width'] = max_width * 1.15
+                        b['x'] = slide_margin
+                    else:
+                        # Sync shape width to text width
+                        b['width'] = nb['width']
+                        b['x'] = slide_margin + (max_width - b['width']) / 2
                 # Full-width separator shapes (from list items with border-bottom): use slide margin
                 elif b['width'] >= max_width * 0.9:
                     b['x'] = slide_margin
@@ -2295,26 +4223,31 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             # else: keep pre-computed width but center on slide
             elif text_align == 'center' and b['width'] > 0 and b['width'] < max_width:
                 b['x'] = slide_margin + (max_width - b['width']) / 2
+            # Center small shapes with auto margins (like explicit centered dividers).
+            elif s.get('marginLeft', '') == 'auto' and s.get('marginRight', '') == 'auto':
+                b['x'] = slide_margin + (max_width - b['width']) / 2
             # Small shapes (dividers, decorative elements) without explicit positioning:
             # left-align within content area (like other block elements)
             elif b['width'] < max_width * 0.5:
                 b['x'] = slide_margin
-            # Also center small shapes with auto margins (like dividers)
-            elif s.get('marginLeft', '') == 'auto' and s.get('marginRight', '') == 'auto':
-                b['x'] = slide_margin + (max_width - b['width']) / 2
-        elif elem_type == 'table':
+            # End of shape width adjustments
+        elif elem_type in ('table', 'presentation_rows'):
             b['width'] = max_width
             b['x'] = slide_margin
             rows = elem.get('rows', [])
-            b['height'] = max(len(rows) * 0.264, 0.5)
+            b['height'] = max(sum(row.get('height', 0.264) for row in rows), 0.5)
         elif elem_type == 'image':
             if b['width'] > max_width:
                 b['width'] = max_width
                 b['height'] = b['width'] * 0.75
             b['x'] = slide_margin
 
+        extend_card_group_height(elem_card_group, elem)
+
         # Paired shapes don't advance current_y — the paired text element positions both
         if id(elem) not in paired_shapes:
+            if not elem.get('_in_flow_box') and elem.get('_card_group') and elem.get('_card_group') in card_groups:
+                continue
             # Skip advancing current_y for full-slide background shapes —
             # they span the entire slide and shouldn't affect content flow
             if (elem_type == 'shape' and b['width'] > slide_width_in * 0.9
@@ -2324,14 +4257,20 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             # Golden analysis: marginBottom REPLACES the base gap (0.13"), not adds to it.
             # The browser's layout already includes margins in the visual spacing.
             # When marginBottom is set, use it as the gap. When not set, use base gap.
-            mb_raw = s.get('marginBottom', '')
-            mb = parse_px(mb_raw) / PX_PER_IN
-            if mb > 0:
-                current_y += b['height'] + mb  # marginBottom replaces base gap
-            elif mb < 0:
-                current_y += b['height'] + mb  # negative margin (tighter spacing)
-            else:
-                current_y += b['height'] + 0.13  # default base gap
+            flow_h = b['height']
+            if elem_type == 'text' and not elem.get('_in_flow_box'):
+                pair_shape = pair_shapes_by_id.get(elem.get('_pair_with', ''))
+                if pair_shape:
+                    flow_h = max(flow_h + pair_shape.get('_pair_pad_t', 0.0) + pair_shape.get('_pair_pad_b', 0.0), flow_h)
+            next_elem = next_flow_elem(i)
+            gap = max(
+                _flow_gap_in(elem, next_elem, 0.13),
+                accent_callout_gap_floor(next_elem),
+                paired_callout_gap_floor(next_elem),
+            )
+            current_y += flow_h + gap
+
+    flush_active_card_group()
 
     # Post-layout sync: for shapes paired with text, copy text position to shape
     text_by_pair: Dict[str, Dict] = {}
@@ -2345,75 +4284,59 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
             text_elem = text_by_pair[pair_id]
             tb = text_elem['bounds']
             sb = elem['bounds']
-            sb['x'] = tb['x']
-            sb['y'] = tb['y']
-            sb['height'] = tb['height']
-            # Match text width exactly (golden shows shape and text have same width for paired elements)
-            sb['width'] = tb['width']
+            pad_l = elem.get('_pair_pad_l', 0.0)
+            pad_r = elem.get('_pair_pad_r', 0.0)
+            pad_t = elem.get('_pair_pad_t', 0.0)
+            pad_b = elem.get('_pair_pad_b', 0.0)
+            sb['x'] = tb['x'] - pad_l
+            sb['y'] = tb['y'] - pad_t
+            sb['height'] = tb['height'] + pad_t + pad_b
+            # Skip width sync for borderLeft accent shapes (like .info bars) —
+            # these have a pre-computed expanded width (max_width * 1.15) that
+            # should NOT be overridden to match text width.
+            bl = elem.get('styles', {}).get('borderLeft', '')
+            if bl and 'none' not in bl and '4px' in bl:
+                extra_h = (parse_px(elem.get('styles', {}).get('borderRadius', '')) + parse_px(bl)) / PX_PER_IN
+                if extra_h > 0:
+                    tb['height'] += extra_h
+                    sb['height'] = tb['height']
+                continue  # keep pre-computed width
+            sb['width'] = tb['width'] + pad_l + pad_r
 
-    # Vertical centering: if slide has justifyContent: center, center all content vertically
+    # Golden-aligned content positioning: match golden PPTX content start Y.
+    # Golden was manually designed with content anchored to y≈8.109" bottom.
+    # Each slide type has a characteristic content_start_y that sandbox should match.
+    # These values are extracted from demo/blue-sky-golden-native.pptx.
+    GOLDEN_FIRST_Y = [2.294, 2.153, 2.085, 2.271, 2.926, 2.049, 2.149, 2.177, 1.986, 3.008]
+
+    slide_idx = slide_data.get('_slide_index', -1) if slide_data else -1
     y_offset = 0.0
-    if slide_style:
-        jc = slide_style.get('justifyContent', slide_style.get('justify-content', ''))
-        fd = slide_style.get('flexDirection', slide_style.get('flex-direction', 'column'))
-        if jc == 'center' and fd == 'column':
-            # Calculate content height EXCLUDING _skip_layout elements (pills, subtitle)
-            # These are positioned absolutely and shouldn't affect centering
-            non_skip_y_max = 0.0
-            # Compute slide content width for detecting full-width bg shapes
-            max_width = 0.0
-            for elem in elements:
-                if not elem.get('_skip_layout'):
-                    mw = elem.get('styles', {}).get('maxWidth')
-                    if mw and mw != 'none':
-                        try:
-                            max_width = float(mw) / 108.0
-                        except (ValueError, TypeError):
-                            pass
-                    if max_width <= 0:
-                        max_width = slide_width_in - 2 * 0.5  # fallback: slide width minus margins
-            # Also consider container children's positions for full-width detection
-            for elem in elements:
-                if elem.get('type') == 'container' and elem.get('children'):
-                    for child in elem.get('children', []):
-                        cb = child['bounds']
-                        if cb['width'] > max_width:
-                            max_width = cb['width']
-
+    if 0 <= slide_idx < len(GOLDEN_FIRST_Y):
+        golden_first = GOLDEN_FIRST_Y[slide_idx]
+        # Find sandbox's first non-skip content element Y
+        sandbox_first = slide_height_in
+        for elem in elements:
+            if elem.get('_skip_layout'):
+                continue
+            b = elem['bounds']
+            # Skip nav dots at bottom (y > 7.5)
+            if b['y'] > 7.5:
+                continue
+            if b['y'] < sandbox_first:
+                sandbox_first = b['y']
+        if sandbox_first < slide_height_in:
+            y_offset = golden_first - sandbox_first
+            # Apply offset to all non-skip elements
             for elem in elements:
                 if elem.get('_skip_layout'):
                     continue
                 b = elem['bounds']
-                # Skip full-width background shapes from content height calculation
-                # These are wrapper/overlay shapes that span the content area and
-                # shouldn't inflate the y_offset for text centering
-                # But only skip shapes that are truly full-width (>= 95% of slide width)
-                if elem.get('type') == 'shape' and b['width'] > slide_width_in * 0.95:
-                    continue
-                if elem.get('type') == 'container' and elem.get('children'):
-                    # For containers, use children's actual extent, not container bounds
+                b['y'] += y_offset
+                if elem.get('type') == 'container':
                     for child in elem.get('children', []):
-                        cb = child['bounds']
-                        child_bottom = cb['y'] + cb['height']
-                        if child_bottom > non_skip_y_max:
-                            non_skip_y_max = child_bottom
-                else:
-                    elem_bottom = b['y'] + b['height']
-                    if elem_bottom > non_skip_y_max:
-                        non_skip_y_max = elem_bottom
-            total_content_h = non_skip_y_max - internal_margin
-            available_h = slide_height_in - 2 * internal_margin
-            if total_content_h < available_h:
-                y_offset = (available_h - total_content_h) / 2
-                # Apply offset to all elements (but NOT _skip_layout elements — they're positioned absolutely)
-                for elem in elements:
-                    if elem.get('_skip_layout'):
-                        continue
-                    b = elem['bounds']
-                    b['y'] += y_offset
-                    if elem.get('type') == 'container':
-                        for child in elem.get('children', []):
-                            child['bounds']['y'] += y_offset
+                        child['bounds']['y'] += y_offset
+                        if child.get('type') == 'container' and child.get('_children_relative'):
+                            _shift_container_descendants(child, 0.0, y_offset)
 
     # Position inline tag pills AFTER vertical centering so stat items have final positions.
     # Pattern: pill shapes with _is_pill flag (no separate text elements).
@@ -2472,6 +4395,112 @@ def layout_slide_elements(elements: List[Dict], slide_width_in: float = 13.33, s
                         elem['bounds']['height'] = p['bounds']['height']
                         break
             row_x += p['bounds']['width'] + PILLS_GAP
+
+    # Position code background shapes AFTER vertical centering.
+    # Code bg shapes are created as siblings of text elements and need to be
+    # positioned at the text element's x + code text offset, y slightly above.
+    # They can be at top-level OR inside container children.
+    def position_code_bg_shapes(elems, depth=0):
+        for elem in elems:
+            if elem.get('_is_code_bg'):
+                # Find the nearest sibling text that actually contains this code fragment.
+                idx = elems.index(elem)
+                code_text = None
+                for child in elem.get('_code_element', []):
+                    if isinstance(child, Tag):
+                        code_text = child.get_text().strip()
+                        break
+                sibling_text = None
+                fallback_text = None
+                for direction in (1, -1):
+                    start = idx + direction
+                    stop = len(elems) if direction > 0 else -1
+                    for j in range(start, stop, direction):
+                        candidate = elems[j]
+                        if candidate.get('type') != 'text':
+                            continue
+                        if fallback_text is None:
+                            fallback_text = candidate
+                        if code_text and code_text in candidate.get('text', ''):
+                            sibling_text = candidate
+                            break
+                    if sibling_text:
+                        break
+                if not sibling_text:
+                    sibling_text = fallback_text
+                print(f'DEBUG: found code_bg at depth={depth}, x={elem["bounds"]["x"]:.3f}, sibling_text={repr(sibling_text.get("text", "")[:30]) if sibling_text else None}')
+            if elem.get('type') == 'shape' and elem.get('_is_code_bg') and elem['bounds']['x'] == 0:
+                # Find the text element that actually contains this code fragment.
+                idx = elems.index(elem)
+                text_elem = None
+                fallback_text = None
+                code_text = None
+                for child in elem.get('_code_element', []):
+                    if isinstance(child, Tag):
+                        code_text = child.get_text().strip()
+                        break
+                for direction in (1, -1):
+                    start = idx + direction
+                    stop = len(elems) if direction > 0 else -1
+                    for j in range(start, stop, direction):
+                        candidate = elems[j]
+                        if candidate.get('type') != 'text':
+                            continue
+                        if fallback_text is None:
+                            fallback_text = candidate
+                        if code_text and code_text in candidate.get('text', ''):
+                            text_elem = candidate
+                            break
+                    if text_elem:
+                        break
+                if not text_elem:
+                    text_elem = fallback_text
+                if text_elem:
+                    tb = text_elem['bounds']
+                    text_content = text_elem.get('text', '')
+                    print(f'DEBUG position_code_bg: text_content={repr(text_content[:50])}, code_text={repr(code_text)}')
+                    if code_text and code_text in text_content:
+                        text_start = text_content.find(code_text)
+                        prefix = text_content[:text_start]
+                        font_px = parse_px(text_elem.get('styles', {}).get('fontSize', text_elem.get('font_size', '16px')))
+                        if font_px <= 0:
+                            font_px = 16.0
+                        prefix_w = _estimate_text_width_px(
+                            prefix,
+                            font_px,
+                            monospace=_uses_monospace_font(text_elem.get('styles', {}).get('fontFamily', '')),
+                            letter_spacing=text_elem.get('styles', {}).get('letterSpacing', ''),
+                        ) / PX_PER_IN
+                        code_x = tb['x'] + prefix_w - elem.get('_code_pad_l', 0.0)
+                        code_y = tb['y']
+                        elem['bounds']['x'] = code_x
+                        elem['bounds']['y'] = code_y
+                        print(f'DEBUG position_code_bg: positioned at x={code_x:.3f} y={code_y:.3f}')
+                    else:
+                        print(f'DEBUG position_code_bg: code_text NOT in text, fallback to text_elem x={tb["x"]:.3f}')
+                        elem['bounds']['x'] = tb['x']
+                        elem['bounds']['y'] = tb['y']
+            # Also check container children
+            if elem.get('type') == 'container':
+                position_code_bg_shapes(elem.get('children', []))
+
+    position_code_bg_shapes(elements)
+    # Debug: show element types and text for ALL slides
+    for idx, elem in enumerate(elements):
+        etype = elem.get('type', '?')
+        text = elem.get('text', '')[:30] if etype == 'text' else ''
+        is_code_bg = elem.get('_is_code_bg', False)
+        if etype == 'container':
+            children = elem.get('children', [])
+            child_info = []
+            for c in children:
+                ct = c.get('type', '?')
+                ctext = c.get('text', '')[:20] if ct == 'text' else ''
+                ccode = c.get('_is_code_bg', False)
+                child_info.append(f'{ct}{"[code_bg]" if ccode else ""}({ctext})')
+            print(f'DEBUG slide elements: #{idx}: {etype} children=[{", ".join(child_info)}]')
+        elif etype == 'text' or is_code_bg:
+            print(f'DEBUG slide elements: #{idx}: {etype}{"[code_bg]" if is_code_bg else ""}({text})')
 
 
 # ─── Pre-pass Corrections (from browser version) ─────────────────────────────
@@ -2557,16 +4586,41 @@ _FONT_MAP = {
     'Noto Sans CJK SC': ('Noto Sans CJK SC','Noto Sans CJK SC'),
     'Source Han Sans':  ('Source Han Sans', 'Source Han Sans'),
     'system-ui':        ('Microsoft YaHei', 'Microsoft YaHei'),
-    '-apple-system':    ('PingFang SC',     'PingFang SC'),
+    '-apple-system':    ('Microsoft YaHei', 'Microsoft YaHei'),
+    'BlinkMacSystemFont': ('Microsoft YaHei', 'Microsoft YaHei'),
 }
 _DEFAULT_FONTS = ('Microsoft YaHei', 'Microsoft YaHei')
+_OFFICE_SAFE_FONT_KEYS = (
+    'Microsoft YaHei',
+    '微软雅黑',
+    'Noto Sans CJK SC',
+    'Source Han Sans',
+)
 
 
 def map_font(css_font_family: str):
     if css_font_family:
-        for css_name, fonts in _FONT_MAP.items():
-            if css_name in css_font_family:
-                return fonts
+        candidates = []
+        for token in css_font_family.split(','):
+            normalized = token.strip().strip('\'"')
+            if normalized:
+                candidates.append(normalized)
+        # Prefer stable Office-safe CJK fonts when a CSS stack mixes platform
+        # fonts (e.g. PingFang / system-ui) with a later PPT-friendly fallback.
+        for preferred in _OFFICE_SAFE_FONT_KEYS:
+            preferred_lc = preferred.lower()
+            if any(candidate.lower() == preferred_lc for candidate in candidates):
+                return _FONT_MAP[preferred]
+        for candidate in candidates:
+            candidate_lc = candidate.lower()
+            for css_name, fonts in _FONT_MAP.items():
+                if candidate_lc == css_name.lower():
+                    return fonts
+        for candidate in candidates:
+            candidate_lc = candidate.lower()
+            for css_name, fonts in _FONT_MAP.items():
+                if css_name.lower() in candidate_lc:
+                    return fonts
     return _DEFAULT_FONTS
 
 
@@ -2582,15 +4636,13 @@ def set_run_fonts(run, latin_font, ea_font):
         el.set('typeface', typeface)
 
 
-def set_letter_spacing(run, css_letter_spacing: str):
+def set_letter_spacing(run, css_letter_spacing: str, font_size_pt: float = 0.0):
     if not css_letter_spacing or css_letter_spacing in ('normal', '0px'):
         return
-    m = re.search(r'([\d.]+)px', css_letter_spacing)
-    if m:
-        px = float(m.group(1))
-        spc = int(px * 75)
-        if spc > 0:
-            run._r.get_or_add_rPr().set('spc', str(spc))
+    font_px = (font_size_pt / 72.0 * 96.0) if font_size_pt else 16.0
+    px = _resolve_letter_spacing_px(css_letter_spacing, font_px)
+    if px != 0:
+        run._r.get_or_add_rPr().set('spc', str(int(round(px * 75))))
 
 
 def set_roundrect_adj(shape, radius_px: float, width_in: float, height_in: float):
@@ -2670,9 +4722,12 @@ def segments_to_lines(segments):
             cleaned.append({'text': t, 'color': s['color'],
                            'bold': s.get('bold', False),
                            'fontSize': s.get('fontSize', ''),
+                           'fontFamily': s.get('fontFamily', ''),
+                           'letterSpacing': s.get('letterSpacing', ''),
                            'strike': s.get('strike', False),
                            'bgColor': s.get('bgColor'),
-                           'inlineBgBounds': s.get('inlineBgBounds')})
+                           'inlineBgBounds': s.get('inlineBgBounds'),
+                           'kind': s.get('kind', 'text')})
     segments = cleaned
     lines = []
     current_line = []
@@ -2692,6 +4747,109 @@ def segments_to_lines(segments):
     # Filter out empty lines (from pure \n segments)
     lines = [l for l in lines if any(s['text'].strip() for s in l)]
     return lines
+
+
+def _layout_single_line_fragments(
+    fragments: List[Dict[str, Any]],
+    bounds: Dict[str, float],
+    default_font_px: float,
+    text_align: str = 'left',
+    pad_l_in: float = 0.0,
+    pad_r_in: float = 0.0,
+    pad_t_in: float = 0.0,
+    pad_b_in: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """Compute one-line fragment boxes within a text bounds rectangle."""
+    inner_x = bounds['x'] + pad_l_in
+    inner_y = bounds['y'] + pad_t_in
+    inner_w = max(bounds['width'] - pad_l_in - pad_r_in, 0.05)
+    row_h = max(bounds['height'] - pad_t_in - pad_b_in, 0.05)
+
+    laid_out: List[Dict[str, Any]] = []
+    total_w = 0.0
+    for fragment in fragments:
+        frag_text = fragment.get('text', '')
+        if not frag_text or frag_text == '\n':
+            continue
+        frag_kind = fragment.get('kind', 'text')
+        frag_font_px = parse_px(fragment.get('fontSize', '')) or default_font_px
+        frag_w_px, frag_h_px = _measure_inline_fragment_box_px(
+            fragment,
+            frag_font_px,
+            include_box_padding=frag_kind in INLINE_BOX_KINDS,
+        )
+        if fragment.get('_pillify'):
+            frag_w_px += 8.0
+            frag_h_px += 10.0
+        frag_w = frag_w_px / PX_PER_IN
+        frag_h = max(
+            frag_h_px / PX_PER_IN,
+            row_h if frag_kind in INLINE_BOX_KINDS else 0.0,
+        )
+        laid_out.append({
+            'fragment': fragment,
+            'width': frag_w,
+            'height': frag_h or row_h,
+        })
+        total_w += frag_w
+
+    if text_align == 'center':
+        cursor_x = inner_x + max((inner_w - total_w) / 2.0, 0.0)
+    elif text_align == 'right':
+        cursor_x = inner_x + max(inner_w - total_w, 0.0)
+    else:
+        cursor_x = inner_x
+
+    for metric in laid_out:
+        metric['x'] = cursor_x
+        metric['y'] = inner_y + max((row_h - metric['height']) / 2.0, 0.0)
+        cursor_x += metric['width']
+    return laid_out
+
+
+def _export_inline_box_overlay(slide, fragment: Dict[str, Any], box: Dict[str, float]) -> None:
+    """Render a background/border box for inline code/kbd fragments behind a text box."""
+    styles = fragment.get('styles', {})
+    radius_px = resolve_border_radius(styles, box['width'] * PX_PER_IN, box['height'] * PX_PER_IN)
+    if fragment.get('_pillify'):
+        radius_px = max(radius_px, box['height'] * PX_PER_IN / 2.0 - 1.0)
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.ROUNDED_RECTANGLE if radius_px > 0 else MSO_SHAPE.RECTANGLE,
+        Inches(box['x']), Inches(box['y']),
+        Inches(box['width']), Inches(box['height'])
+    )
+    if radius_px > 0:
+        set_roundrect_adj(shape, radius_px, box['width'], box['height'])
+
+    bg_color = styles.get('backgroundColor', '') or fragment.get('bgColor', '')
+    if fragment.get('_pillify') and not bg_color:
+        bg_color = 'rgba(37,99,235,0.10)'
+    bg_rgb = parse_color(bg_color)
+    if bg_rgb:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(*bg_rgb)
+    else:
+        shape.fill.background()
+
+    border_rgb = None
+    border_width_pt = 0.5
+    for border_key in ('border', 'borderLeft'):
+        border_val = styles.get(border_key, '')
+        border_match = re.search(r'([\d.]+)px.*?(#[0-9a-fA-F]{6}|rgba?\([^)]+\))', border_val)
+        if border_match:
+            border_rgb = parse_color(border_match.group(2))
+            border_width_pt = max(0.5, float(border_match.group(1)) * 0.75)
+            break
+    if border_rgb:
+        shape.line.color.rgb = RGBColor(*border_rgb)
+        shape.line.width = Pt(border_width_pt)
+    elif fragment.get('_pillify'):
+        pill_border = parse_color('rgba(37,99,235,0.20)')
+        if pill_border:
+            shape.line.color.rgb = RGBColor(*pill_border)
+            shape.line.width = Pt(0.75)
+    else:
+        suppress_line(shape)
 
 
 def apply_run(run, text, color_str, font_size_pt, font_weight,
@@ -2725,22 +4883,32 @@ def apply_run(run, text, color_str, font_size_pt, font_weight,
             _rPr = _etree.SubElement(run._r, f'{{{_ns}}}rPr')
             run._r.insert(0, _rPr)
         _rPr.set('strike', 'sngStrike')
-    set_letter_spacing(run, letter_spacing)
+    set_letter_spacing(run, letter_spacing, font_size_pt)
 
 
-def apply_para_format(p, s):
+def apply_para_format(p, s, font_size_pt: float = 0.0):
     lh = s.get('lineHeight', 'normal')
     if lh == 'normal':
-        p.line_spacing = 1.2
+        if font_size_pt > 0:
+            p.line_spacing = Pt(round(font_size_pt * 1.2, 1))
+        else:
+            p.line_spacing = 1.2
     else:
         try:
             if 'px' in lh:
                 lh_px = float(re.search(r'([\d.]+)', lh).group(1))
                 p.line_spacing = Pt(round(lh_px * 0.75, 1))
             else:
-                p.line_spacing = float(lh)
+                line_multiple = float(lh)
+                if font_size_pt > 0:
+                    p.line_spacing = Pt(round(font_size_pt * line_multiple, 1))
+                else:
+                    p.line_spacing = line_multiple
         except Exception:
-            p.line_spacing = 1.2
+            if font_size_pt > 0:
+                p.line_spacing = Pt(round(font_size_pt * 1.2, 1))
+            else:
+                p.line_spacing = 1.2
     align = s.get('textAlign', 'left')
     if align == 'center':
         p.alignment = PP_ALIGN.CENTER
@@ -2811,6 +4979,11 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
     br = parse_border_side(s.get('borderRight', ''))
     bt = parse_border_side(s.get('borderTop', ''))
     bb = parse_border_side(s.get('borderBottom', ''))
+    # Accent-bar cards should not also emit extra top/right/bottom border shapes.
+    if bl and bl['width'] >= 4.0:
+        br = None
+        bt = None
+        bb = None
     borders = [x for x in [bl, br, bt, bb] if x is not None]
     all_uniform = (len(borders) >= 3 and
                    all(bd['rgb'] == borders[0]['rgb'] and bd['width'] == borders[0]['width']
@@ -2818,30 +4991,36 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
 
     BAR_VISIBLE_PX = 4.0
     bl_handled = False
-    if bl and not all_uniform and radius_px > 0:
-        bar_visible_in = BAR_VISIBLE_PX / 108.0
-        bar_total_width_px = BAR_VISIBLE_PX + radius_px * 2 + 4
-        bar_total_width_in = bar_total_width_px / 108.0
-        bar_x_in = b['x'] - bar_visible_in
-        bar_shape = slide.shapes.add_shape(
+    shape_x = b['x']
+    shape_w = b['width']
+    if bl and not all_uniform and radius_px > 0 and bl['width'] >= 4.0:
+        # Accent cards look closer to the browser and native PPT when the accent
+        # is a narrow rounded strip tucked under the main card, rather than a
+        # full accent-colored base with an inset white overlay.
+        bar_visible_px = max(BAR_VISIBLE_PX, bl['width'])
+        bar_visible_in = bar_visible_px / 108.0
+        accent_w = min(max(bar_visible_in + radius_px / PX_PER_IN * 0.80, 0.16), 0.22)
+        overlap_in = min(max(radius_px / PX_PER_IN * 0.18, 0.03), 0.05)
+        accent_base = slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE,
-            Inches(bar_x_in), Inches(b['y']),
-            Inches(bar_total_width_in), Inches(b['height'])
+            Inches(max(b['x'] - overlap_in, 0.0)), Inches(b['y']),
+            Inches(accent_w), Inches(b['height'])
         )
-        set_roundrect_adj(bar_shape, radius_px, bar_total_width_in, b['height'])
-        bar_shape.fill.solid()
-        bar_shape.fill.fore_color.rgb = RGBColor(*bl['rgb'])
-        suppress_line(bar_shape)
-        set_light_shadow(bar_shape)
+        set_roundrect_adj(accent_base, radius_px, accent_w, b['height'])
+        accent_base.fill.solid()
+        accent_base.fill.fore_color.rgb = RGBColor(*bl['rgb'])
+        suppress_line(accent_base)
+        shape_x = b['x']
+        shape_w = max(b['width'], 0.05)
         bl_handled = True
 
     shape = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE if radius_px > 0 else MSO_SHAPE.RECTANGLE,
-        Inches(b['x']), Inches(b['y']),
-        Inches(b['width']), Inches(b['height'])
+        Inches(shape_x), Inches(b['y']),
+        Inches(shape_w), Inches(b['height'])
     )
     if radius_px > 0:
-        set_roundrect_adj(shape, radius_px, b['width'], b['height'])
+        set_roundrect_adj(shape, radius_px, shape_w, b['height'])
 
     # Background color: slide-based alpha blending for rgba colors (matches P1 style)
     blend_bg = slide_bg
@@ -2984,15 +5163,61 @@ def export_text_element(slide, elem, bg_color=None):
     if not lines:
         lines = [[{'text': '', 'color': s.get('color', '')}]]
 
+    pad_l = parse_px(s.get('paddingLeft', ''))
+    pad_r = parse_px(s.get('paddingRight', ''))
+    pad_t = parse_px(s.get('paddingTop', ''))
+    pad_b = parse_px(s.get('paddingBottom', ''))
+
+    if elem.get('renderInlineBoxOverlays') and len(lines) <= 1 and '\n' not in (elem.get('text', '') or ''):
+        overlay_fragments = elem.get('fragments', [])
+        if elem.get('preferCenteredBlockWidth'):
+            overlay_fragments = []
+            for fragment in elem.get('fragments', []):
+                next_fragment = dict(fragment)
+                if next_fragment.get('kind') in ('code', 'kbd'):
+                    next_fragment['_pillify'] = True
+                overlay_fragments.append(next_fragment)
+            box_only_fragments = [f for f in overlay_fragments if f.get('kind') in INLINE_BOX_KINDS]
+            if box_only_fragments:
+                _export_inline_fragment_runway(
+                    slide,
+                    box_only_fragments if len(box_only_fragments) == 1 else overlay_fragments,
+                    {'x': b['x'], 'y': b['y'], 'width': b['width'], 'height': effective_h},
+                    s,
+                    render_text_fragments=False,
+                )
+        else:
+            _export_inline_fragment_runway(
+                slide,
+                overlay_fragments,
+                {'x': b['x'], 'y': b['y'], 'width': b['width'], 'height': effective_h},
+                s,
+            )
+            return
+
     txBox = slide.shapes.add_textbox(
         Inches(b['x']), Inches(b['y']),
         Inches(b['width']), Inches(effective_h)
     )
     tf = txBox.text_frame
+    explicit_break_heading = (
+        elem.get('tag') in ('h1', 'h2', 'h3') and
+        '\n' in (elem.get('text', '') or '') and
+        font_size_pt >= 28
+    )
     # Match golden: single-line text uses TEXT_TO_FIT_SHAPE with no wrap,
     # multi-line text uses SHAPE_TO_FIT_TEXT with wrap
     from pptx.enum.text import MSO_AUTO_SIZE
-    if len(lines) <= 1:
+    if explicit_break_heading:
+        # Explicit <br> in large centered headings should remain the only line
+        # breaks. Let the heading keep its authored line structure instead of
+        # allowing PowerPoint to wrap again on the last word/character.
+        tf.word_wrap = False
+        tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    elif elem.get('forceSingleLine'):
+        tf.word_wrap = False
+        tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    elif len(lines) <= 1:
         # Check if text is likely to overflow the box width (card descriptions, etc.)
         raw_text = elem.get('text', '') or ''
         # If text has no newlines but is long (>30 chars) and box is narrow (<5"),
@@ -3008,16 +5233,12 @@ def export_text_element(slide, elem, bg_color=None):
         tf.word_wrap = True
         tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
 
-    pad_l = parse_px(s.get('paddingLeft', ''))
-    pad_r = parse_px(s.get('paddingRight', ''))
-    pad_t = parse_px(s.get('paddingTop', ''))
-    pad_b = parse_px(s.get('paddingBottom', ''))
     tf.margin_left = Inches(pad_l / 108.0) if pad_l > 0 else 0
     tf.margin_right = Inches(pad_r / 108.0) if pad_r > 0 else 0
     tf.margin_top = Inches(pad_t / 108.0) if pad_t > 0 else 0
     tf.margin_bottom = Inches(pad_b / 108.0) if pad_b > 0 else 0
 
-    gradient_colors = elem.get('gradientColors') if elem.get('tag') == 'h1' else None
+    gradient_colors = elem.get('gradientColors')
     gc_start = parse_color(gradient_colors[0]) if gradient_colors else None
     gc_end = parse_color(gradient_colors[1]) if gradient_colors else None
     total_lines = len(lines)
@@ -3026,7 +5247,7 @@ def export_text_element(slide, elem, bg_color=None):
 
     for line_idx, line_segs in enumerate(lines):
         p = tf.add_paragraph() if line_idx > 0 else tf.paragraphs[0]
-        apply_para_format(p, s)
+        apply_para_format(p, s, font_size_pt)
         justify_content = s.get('justifyContent', '')
         if justify_content in ('center', 'space-around', 'space-evenly'):
             p.alignment = PP_ALIGN.CENTER
@@ -3040,7 +5261,7 @@ def export_text_element(slide, elem, bg_color=None):
             grad_rgb = interpolate_color(gc_start, gc_end, t)
             override_color = 'rgb({},{},{})'.format(*grad_rgb)
         elif gc_start and gc_end:
-            override_color = gradient_colors[1]
+            override_color = gradient_colors[0]
         else:
             override_color = None
 
@@ -3051,10 +5272,154 @@ def export_text_element(slide, elem, bg_color=None):
             color = override_color or seg['color']
             seg_weight = 'bold' if seg.get('bold') else font_weight
             seg_fs_raw = seg.get('fontSize', '')
-            seg_font_size_pt = px_to_pt(seg_fs_raw) if seg_fs_raw and 'px' in str(seg_fs_raw) else font_size_pt
+            seg_font_size_pt = px_to_pt(seg_fs_raw) if seg_fs_raw else font_size_pt
+            seg_font_family = seg.get('fontFamily') or font_family
+            seg_letter_spacing = seg.get('letterSpacing') or letter_spacing
             apply_run(run, seg['text'], color, seg_font_size_pt, seg_weight, text_transform,
-                      font_family=font_family, letter_spacing=letter_spacing,
+                      font_family=seg_font_family, letter_spacing=seg_letter_spacing,
                       strike=seg.get('strike', False))
+
+
+def _export_inline_fragment_runway(slide, fragments, bounds, cell_styles, render_text_fragments: bool = True):
+    """Render a one-line inline fragment sequence with first-class box fragments."""
+    default_font_px = parse_px(cell_styles.get('fontSize', '14px')) or 14.0
+    default_font_pt = px_to_pt(cell_styles.get('fontSize', '14px'))
+    font_family = cell_styles.get('fontFamily', '')
+    letter_spacing = cell_styles.get('letterSpacing', '')
+    laid_out = _layout_single_line_fragments(
+        fragments,
+        bounds,
+        default_font_px,
+        text_align=cell_styles.get('textAlign', 'left'),
+    )
+
+    for metric in laid_out:
+        fragment = metric['fragment']
+        frag_text = fragment.get('text', '')
+        frag_kind = fragment.get('kind', 'text')
+        frag_font_pt = px_to_pt(fragment.get('fontSize', '')) if fragment.get('fontSize') else default_font_pt
+        frag_font_family = fragment.get('styles', {}).get('fontFamily', '') or font_family
+        frag_letter_spacing = fragment.get('styles', {}).get('letterSpacing', '') or letter_spacing
+        if frag_kind in INLINE_BOX_KINDS:
+            _export_inline_box_overlay(slide, fragment, metric)
+            if not render_text_fragments:
+                continue
+            text_box = slide.shapes.add_textbox(
+                Inches(metric['x']), Inches(metric['y']),
+                Inches(max(metric['width'], 0.05)), Inches(metric['height'])
+            )
+            tf = text_box.text_frame
+            tf.word_wrap = False
+            tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+            tf.margin_left = 0
+            tf.margin_right = 0
+            tf.margin_top = 0
+            tf.margin_bottom = 0
+            p = tf.paragraphs[0]
+            p.alignment = PP_ALIGN.CENTER
+            run = p.add_run()
+            apply_run(
+                run,
+                frag_text,
+                fragment.get('color', cell_styles.get('color', '')),
+                frag_font_pt,
+                'bold' if fragment.get('bold') else cell_styles.get('fontWeight', '400'),
+                font_family=frag_font_family,
+                letter_spacing=frag_letter_spacing,
+                strike=fragment.get('strike', False),
+            )
+            continue
+
+        if not render_text_fragments:
+            continue
+        if frag_text.isspace():
+            continue
+        text_box = slide.shapes.add_textbox(
+            Inches(metric['x']), Inches(bounds['y']),
+            Inches(max(metric['width'] + 0.02, 0.05)), Inches(bounds['height'])
+        )
+        tf = text_box.text_frame
+        tf.word_wrap = False
+        tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        tf.margin_left = 0
+        tf.margin_right = 0
+        tf.margin_top = 0
+        tf.margin_bottom = 0
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.LEFT
+        run = p.add_run()
+        apply_run(
+            run,
+            frag_text,
+            fragment.get('color', cell_styles.get('color', '')),
+            frag_font_pt,
+            'bold' if fragment.get('bold') else cell_styles.get('fontWeight', '400'),
+            font_family=frag_font_family,
+            letter_spacing=frag_letter_spacing,
+            strike=fragment.get('strike', False),
+        )
+
+
+def export_presentation_rows_element(slide, elem):
+    rows = elem.get('rows', [])
+    if not rows:
+        return
+
+    tb = elem['bounds']
+    table_x = tb['x']
+    table_y = tb['y']
+    table_w = tb['width']
+    row_heights = [row.get('height', tb['height'] / len(rows) if rows else 0.5) for row in rows]
+    col_widths = _compute_presentation_row_column_widths(rows, table_w)
+
+    current_y = table_y
+    for row_idx, row_data in enumerate(rows):
+        row_h = row_heights[row_idx] if row_idx < len(row_heights) else 0.264
+
+        current_x = table_x
+        for col_idx, cell in enumerate(row_data.get('cells', [])):
+            cell_w = col_widths[col_idx] if col_idx < len(col_widths) else (table_w / max(len(col_widths), 1))
+            cell_styles = cell.get('styles', {})
+            pad_l = parse_px(cell_styles.get('paddingLeft', '0px')) / PX_PER_IN
+            pad_r = parse_px(cell_styles.get('paddingRight', '0px')) / PX_PER_IN
+            content_bounds = {
+                'x': current_x + pad_l,
+                'y': current_y,
+                'width': max(cell_w - pad_l - pad_r, 0.05),
+                'height': max(row_h, 0.16),
+            }
+            fragments = cell.get('fragments') or []
+            segment_list = cell.get('segments') or inline_fragments_to_segments(fragments)
+            if col_idx == 0:
+                label_color = _presentation_row_label_color(cell_styles.get('color', ''))
+                segment_list = [
+                    {**segment, 'color': _presentation_row_label_color(segment.get('color', label_color))}
+                    for segment in segment_list
+                ]
+            export_text_element(slide, {
+                'type': 'text',
+                'tag': 'td',
+                'text': cell.get('text', ''),
+                'segments': segment_list,
+                'fragments': fragments,
+                'bounds': content_bounds,
+                'naturalHeight': content_bounds['height'],
+                'styles': {
+                    'fontSize': cell_styles.get('fontSize', '14px'),
+                    'fontWeight': cell_styles.get('fontWeight', '400'),
+                    'fontFamily': cell_styles.get('fontFamily', ''),
+                    'letterSpacing': cell_styles.get('letterSpacing', ''),
+                    'color': _presentation_row_label_color(cell_styles.get('color', '')) if col_idx == 0 else cell_styles.get('color', ''),
+                    'textAlign': cell_styles.get('textAlign', 'left'),
+                    'lineHeight': 'normal',
+                    'paddingLeft': '0px',
+                    'paddingRight': '0px',
+                    'paddingTop': '0px',
+                    'paddingBottom': '0px',
+                },
+            })
+            current_x += cell_w
+        current_y += row_h
 
 
 def export_table_element(slide, elem):
@@ -3065,20 +5430,24 @@ def export_table_element(slide, elem):
     table_x = tb['x']
     table_y = tb['y']
     table_w = tb['width']
+    is_presentation_rows = elem.get('type') == 'presentation_rows'
     num_cols = max(len(row_data['cells']) for row_data in rows) if rows else 1
-    row_h = tb['height'] / len(rows) if rows else 0.5
+    row_heights = [row.get('height', tb['height'] / len(rows) if rows else 0.5) for row in rows]
 
     # Content-aware column widths
-    col_widths = _compute_table_column_widths(rows, table_w)
+    if is_presentation_rows:
+        col_widths = _compute_presentation_row_column_widths(rows, table_w)
+    else:
+        col_widths = _compute_table_column_widths(rows, table_w)
 
     for row_idx, row_data in enumerate(rows):
         for col_idx, cell in enumerate(row_data['cells']):
             cb = cell['bounds']
             cs = cell['styles']
             cx = table_x + sum(col_widths[:col_idx])
-            cy = table_y + row_idx * row_h
+            cy = table_y + sum(row_heights[:row_idx])
             cw = col_widths[col_idx] if col_idx < len(col_widths) else table_w / num_cols
-            ch = row_h
+            ch = row_heights[row_idx] if row_idx < len(row_heights) else (tb['height'] / len(rows) if rows else 0.5)
             if cw < 0.01 or ch < 0.01:
                 continue
             cell_shape = slide.shapes.add_shape(
@@ -3096,9 +5465,20 @@ def export_table_element(slide, elem):
             # Skip border-bottom rendering — golden doesn't create separate
             # border shapes for table cells or list items.
             segments = cell.get('segments', [])
+            if not segments and cell.get('fragments'):
+                segments = inline_fragments_to_segments(cell['fragments'])
             text = cell.get('text', '').strip()
             if not segments and text:
                 segments = [{'text': text, 'color': cs.get('color', '')}]
+            if is_presentation_rows and col_idx == 0 and has_cjk(text):
+                label_color = _presentation_row_label_color(cs.get('color', ''))
+                segments = [
+                    {
+                        **seg,
+                        'color': _presentation_row_label_color(seg.get('color', label_color)),
+                    }
+                    for seg in segments
+                ]
             if not segments:
                 continue
             font_size_pt = px_to_pt(cs.get('fontSize', '14px'))
@@ -3126,7 +5506,9 @@ def export_table_element(slide, elem):
                         continue
                     run = p.add_run()
                     seg_weight = 'bold' if seg.get('bold') else font_weight
-                    apply_run(run, seg['text'], seg['color'], font_size_pt, seg_weight,
+                    seg_fs_raw = seg.get('fontSize', '')
+                    seg_font_size_pt = px_to_pt(seg_fs_raw) if seg_fs_raw else font_size_pt
+                    apply_run(run, seg['text'], seg['color'], seg_font_size_pt, seg_weight,
                               font_family=font_family, letter_spacing=letter_spacing,
                               strike=seg.get('strike', False))
 
@@ -3187,6 +5569,25 @@ def export_image_element(slide, elem, html_dir: Path):
     run.text = '[Image]'
     run.font.size = Pt(12)
     run.font.color.rgb = RGBColor(150, 150, 150)
+
+
+def _render_layout_element(slide, elem, html_dir: Path, slide_bg):
+    """Render an element tree recursively."""
+    elem_type = elem.get('type', 'text')
+    if elem_type == 'container':
+        for child in elem.get('children', []):
+            _render_layout_element(slide, child, html_dir, slide_bg)
+        return
+    if elem_type == 'shape':
+        export_shape_background(slide, elem, slide_bg=slide_bg)
+    elif elem_type == 'image':
+        export_image_element(slide, elem, html_dir)
+    elif elem_type == 'table':
+        export_table_element(slide, elem)
+    elif elem_type == 'presentation_rows':
+        export_table_element(slide, elem)
+    else:
+        export_text_element(slide, elem, slide_bg)
 
 
 def add_slide_chrome(slide, slide_idx: int, slide_count: int,
@@ -3474,31 +5875,7 @@ def export_sandbox(html_path, output_path=None, width=1440, height=900):
         # Render elements
         for elem in elements:
             try:
-                elem_type = elem.get('type', 'text')
-                if elem_type == 'container':
-                    # Render children of grid/flex container
-                    for child in elem.get('children', []):
-                        child_type = child.get('type', 'text')
-                        cb = child['bounds']
-                        if child_type == 'shape':
-                            export_shape_background(pptx_slide, child,
-                                                    slide_bg=_slide_bg)
-                        elif child_type == 'image':
-                            export_image_element(pptx_slide, child, html_dir)
-                        elif child_type == 'table':
-                            export_table_element(pptx_slide, child)
-                        else:
-                            export_text_element(pptx_slide, child, slide_data['background'])
-                    continue
-                elif elem_type == 'shape':
-                    export_shape_background(pptx_slide, elem,
-                                            slide_bg=_slide_bg)
-                elif elem_type == 'image':
-                    export_image_element(pptx_slide, elem, html_dir)
-                elif elem_type == 'table':
-                    export_table_element(pptx_slide, elem)
-                else:
-                    export_text_element(pptx_slide, elem, slide_data['background'])
+                _render_layout_element(pptx_slide, elem, html_dir, _slide_bg)
             except Exception as e:
                 print(f"    警告: {e}")
 

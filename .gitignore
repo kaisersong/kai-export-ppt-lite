@@ -3,9 +3,17 @@ __pycache__/
 *.pyc
 *.py.bak
 *.bak
+.DS_Store
 
 # Demo/debug
 demo/
-dump_compare.py
+scripts/dump_compare.py
 scripts/_debug*.py
 .gstack/
+docs
+
+# Root output artifacts
+output*.pptx
+output*.png
+golden-copy.pptx
+blue-sky-golden.pptx

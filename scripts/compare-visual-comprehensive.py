@@ -14,7 +14,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from lxml import etree
 
 GOLDEN = "/tmp/kai-html-export-golden.pptx"
-SANDBOX = "/Users/song/projects/kai-export-ppt-lite/output.pptx"
+SANDBOX = "/Users/song/projects/kai-export-ppt-lite/demo/output.pptx"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 

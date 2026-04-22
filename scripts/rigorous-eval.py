@@ -13,6 +13,7 @@ Usage:
     python3 scripts/rigorous-eval.py
 """
 
+import argparse
 import sys
 import subprocess
 from pathlib import Path
@@ -23,15 +24,17 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from typing import List, Dict, Tuple, Optional
 
 GOLDEN = "/tmp/kai-html-export-golden.pptx"
-SANDBOX = "output.pptx"
+SANDBOX = "demo/output.pptx"
 
 EMU_PER_IN = 914400
 
 
 # ─── 1. Visual comprehensive (wrapper) ─────────────────────────────────
 
-def run_visual_comprehensive() -> str:
+def run_visual_comprehensive(golden_path: str = GOLDEN, sandbox_path: str = SANDBOX) -> str:
     """Run compare-visual-comprehensive.py and return summary."""
+    if Path(golden_path).resolve() != Path(GOLDEN).resolve() or Path(sandbox_path).resolve() != Path(SANDBOX).resolve():
+        return "  SKIP: visual comprehensive only supports the default GOLDEN/SANDBOX pair"
     result = subprocess.run(
         [sys.executable, "scripts/compare-visual-comprehensive.py"],
         capture_output=True, text=True, timeout=60
@@ -177,7 +180,7 @@ def check_overlap(pptx_path: str, label: str) -> List[str]:
 
 # ─── 4. Position drift analysis ────────────────────────────────────────
 
-def check_position_drift() -> List[str]:
+def check_position_drift(golden_path: str = GOLDEN, sandbox_path: str = SANDBOX) -> List[str]:
     """Analyze systematic position offsets between golden and sandbox."""
     from collections import defaultdict
 
@@ -187,8 +190,8 @@ def check_position_drift() -> List[str]:
         # Inline minimal matching
         pass
 
-    prs_g = Presentation(GOLDEN)
-    prs_s = Presentation(SANDBOX)
+    prs_g = Presentation(golden_path)
+    prs_s = Presentation(sandbox_path)
     num_slides = min(len(prs_g.slides), len(prs_s.slides))
 
     issues = []
@@ -243,10 +246,10 @@ def check_position_drift() -> List[str]:
 
 # ─── 5. Element count gap analysis ──────────────────────────────────────
 
-def check_element_gaps() -> List[str]:
+def check_element_gaps(golden_path: str = GOLDEN, sandbox_path: str = SANDBOX) -> List[str]:
     """Categorize missing and extra elements."""
-    prs_g = Presentation(GOLDEN)
-    prs_s = Presentation(SANDBOX)
+    prs_g = Presentation(golden_path)
+    prs_s = Presentation(sandbox_path)
     num_slides = min(len(prs_g.slides), len(prs_s.slides))
 
     issues = []
@@ -290,12 +293,98 @@ def check_element_gaps() -> List[str]:
     return issues
 
 
-# ─── 6. Color diff analysis ─────────────────────────────────────────────
+# ─── 6. Card containment analysis ───────────────────────────────────────
 
-def check_color_diffs() -> List[str]:
+def _shape_box(shape) -> Dict[str, float]:
+    return {
+        "x": shape.left / EMU_PER_IN,
+        "y": shape.top / EMU_PER_IN,
+        "w": shape.width / EMU_PER_IN,
+        "h": shape.height / EMU_PER_IN,
+    }
+
+
+def _text_box(shape) -> Dict[str, float]:
+    box = _shape_box(shape)
+    box["text"] = shape.text.strip()
+    return box
+
+
+def _is_card_like_shape(shape) -> bool:
+    if hasattr(shape, "text") and shape.text.strip():
+        return False
+    box = _shape_box(shape)
+    return 2.0 <= box["w"] <= 12.0 and 0.6 <= box["h"] <= 3.0
+
+
+def _find_containing_card(text_box: Dict[str, float], cards: List[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    best = None
+    best_overlap = 0.0
+    tx1, tx2 = text_box["x"], text_box["x"] + text_box["w"]
+    for card in cards:
+        cx1, cx2 = card["x"], card["x"] + card["w"]
+        overlap = min(tx2, cx2) - max(tx1, cx1)
+        if overlap <= 0:
+            continue
+        overlap_ratio = overlap / max(text_box["w"], 0.01)
+        if overlap_ratio < 0.6:
+            continue
+        if text_box["y"] < card["y"] - 0.15:
+            continue
+        if best is None or overlap_ratio > best_overlap:
+            best = card
+            best_overlap = overlap_ratio
+    return best
+
+
+def check_card_containment(golden_path: str = GOLDEN, sandbox_path: str = SANDBOX) -> List[str]:
+    """Detect text that should sit inside a card but is stacked below it."""
+    prs_g = Presentation(golden_path)
+    prs_s = Presentation(sandbox_path)
+    num_slides = min(len(prs_g.slides), len(prs_s.slides))
+
+    issues = []
+    for si in range(num_slides):
+        golden_cards = [_shape_box(s) for s in prs_g.slides[si].shapes if _is_card_like_shape(s)]
+        sandbox_cards = [_shape_box(s) for s in prs_s.slides[si].shapes if _is_card_like_shape(s)]
+        if not golden_cards or not sandbox_cards:
+            continue
+
+        golden_texts = {}
+        for s in prs_g.slides[si].shapes:
+            if hasattr(s, "text") and s.text.strip():
+                golden_texts[s.text.strip()[:60]] = _text_box(s)
+
+        for s in prs_s.slides[si].shapes:
+            if not (hasattr(s, "text") and s.text.strip()):
+                continue
+            key = s.text.strip()[:60]
+            if key not in golden_texts:
+                continue
+            sandbox_text = _text_box(s)
+            golden_text = golden_texts[key]
+            golden_card = _find_containing_card(golden_text, golden_cards)
+            sandbox_card = _find_containing_card(sandbox_text, sandbox_cards)
+            if not golden_card or not sandbox_card:
+                continue
+
+            golden_inside = golden_text["y"] <= golden_card["y"] + golden_card["h"] + 0.1
+            sandbox_outside = sandbox_text["y"] > sandbox_card["y"] + sandbox_card["h"] + 0.05
+            if golden_inside and sandbox_outside:
+                issues.append(
+                    f"  [CARD] Slide {si+1}: text '{key[:40]}' is below its card in sandbox "
+                    f"(text_y={sandbox_text['y']:.2f}\", card_bottom={sandbox_card['y'] + sandbox_card['h']:.2f}\")"
+                )
+
+    return issues
+
+
+# ─── 7. Color diff analysis ─────────────────────────────────────────────
+
+def check_color_diffs(golden_path: str = GOLDEN, sandbox_path: str = SANDBOX) -> List[str]:
     """Find color mismatches between golden and sandbox."""
-    prs_g = Presentation(GOLDEN)
-    prs_s = Presentation(SANDBOX)
+    prs_g = Presentation(golden_path)
+    prs_s = Presentation(sandbox_path)
     num_slides = min(len(prs_g.slides), len(prs_s.slides))
 
     issues = []
@@ -324,27 +413,88 @@ def check_color_diffs() -> List[str]:
     return issues
 
 
+def collect_eval_summary(
+    golden_path: str = GOLDEN,
+    sandbox_path: str = SANDBOX,
+    include_visual: bool = True,
+) -> Dict[str, object]:
+    """Return a structured evaluation summary for a golden/sandbox PPTX pair."""
+    visual_summary = None
+    if include_visual:
+        visual_summary = run_visual_comprehensive(golden_path, sandbox_path)
+
+    golden_overflows = check_overflow(golden_path, "GOLDEN")
+    sandbox_overflows = check_overflow(sandbox_path, "SANDBOX")
+    golden_overlaps = check_overlap(golden_path, "GOLDEN")
+    sandbox_overlaps = check_overlap(sandbox_path, "SANDBOX")
+    drift_issues = check_position_drift(golden_path, sandbox_path)
+    gap_issues = check_element_gaps(golden_path, sandbox_path)
+    card_issues = check_card_containment(golden_path, sandbox_path)
+    color_issues = check_color_diffs(golden_path, sandbox_path)
+    total_issues = (
+        len(sandbox_overflows)
+        + len(sandbox_overlaps)
+        + len(gap_issues)
+        + len(card_issues)
+        + len(color_issues)
+    )
+
+    return {
+        "golden_path": golden_path,
+        "sandbox_path": sandbox_path,
+        "visual_summary": visual_summary,
+        "golden_overflow_issues": golden_overflows,
+        "sandbox_overflow_issues": sandbox_overflows,
+        "golden_overlap_issues": golden_overlaps,
+        "sandbox_overlap_issues": sandbox_overlaps,
+        "position_drift_issues": drift_issues,
+        "element_gap_issues": gap_issues,
+        "card_containment_issues": card_issues,
+        "color_diff_issues": color_issues,
+        "golden_overflow_count": len(golden_overflows),
+        "sandbox_overflow_count": len(sandbox_overflows),
+        "golden_overlap_count": len(golden_overlaps),
+        "sandbox_overlap_count": len(sandbox_overlaps),
+        "element_gap_count": len(gap_issues),
+        "card_containment_count": len(card_issues),
+        "color_diff_count": len(color_issues),
+        "total_actionable": total_issues,
+    }
+
+
 # ─── Main ──────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Rigorous HTML→PPTX export evaluation")
+    parser.add_argument("--golden", default=GOLDEN, help="Golden PPTX path")
+    parser.add_argument("--sandbox", default=SANDBOX, help="Sandbox PPTX path")
+    parser.add_argument("--skip-visual", action="store_true", help="Skip compare-visual-comprehensive wrapper")
+    args = parser.parse_args()
+
+    summary = collect_eval_summary(
+        golden_path=args.golden,
+        sandbox_path=args.sandbox,
+        include_visual=not args.skip_visual,
+    )
+
     print("=" * 80)
     print("RIGOROUS MULTI-DIMENSIONAL EVALUATION")
-    print(f"  Golden:  {GOLDEN}")
-    print(f"  Sandbox: {SANDBOX}")
+    print(f"  Golden:  {summary['golden_path']}")
+    print(f"  Sandbox: {summary['sandbox_path']}")
     print("=" * 80)
 
     # 1. Visual comprehensive
     print("\n" + "=" * 80)
     print("DIMENSION 1: Visual Comprehensive (compare-visual-comprehensive.py)")
     print("=" * 80)
-    print(run_visual_comprehensive())
+    print(summary["visual_summary"] or "  SKIP: visual comprehensive disabled")
 
     # 2. Overflow check
     print("\n" + "=" * 80)
     print("DIMENSION 2: Text Overflow Check")
     print("=" * 80)
-    golden_overflows = check_overflow(GOLDEN, "GOLDEN")
-    sandbox_overflows = check_overflow(SANDBOX, "SANDBOX")
+    golden_overflows = summary["golden_overflow_issues"]
+    sandbox_overflows = summary["sandbox_overflow_issues"]
     all_overflows = golden_overflows + sandbox_overflows
     if all_overflows:
         for issue in all_overflows:
@@ -357,8 +507,8 @@ def main():
     print("\n" + "=" * 80)
     print("DIMENSION 3: Element Overlap Check")
     print("=" * 80)
-    sandbox_overlaps = check_overlap(SANDBOX, "SANDBOX")
-    golden_overlaps = check_overlap(GOLDEN, "GOLDEN")
+    sandbox_overlaps = summary["sandbox_overlap_issues"]
+    golden_overlaps = summary["golden_overlap_issues"]
     all_overlaps = golden_overlaps + sandbox_overlaps
     if all_overlaps:
         for issue in all_overlaps:
@@ -371,7 +521,7 @@ def main():
     print("\n" + "=" * 80)
     print("DIMENSION 4: Position Drift Analysis")
     print("=" * 80)
-    drift_issues = check_position_drift()
+    drift_issues = summary["position_drift_issues"]
     for issue in drift_issues:
         print(issue)
 
@@ -379,18 +529,29 @@ def main():
     print("\n" + "=" * 80)
     print("DIMENSION 5: Element Gap Analysis")
     print("=" * 80)
-    gap_issues = check_element_gaps()
+    gap_issues = summary["element_gap_issues"]
     if gap_issues:
         for issue in gap_issues:
             print(issue)
     else:
         print("  ✓ No element gaps detected")
 
-    # 6. Color diffs
+    # 6. Card containment
     print("\n" + "=" * 80)
-    print("DIMENSION 6: Color Difference Analysis")
+    print("DIMENSION 6: Card Containment Analysis")
     print("=" * 80)
-    color_issues = check_color_diffs()
+    card_issues = summary["card_containment_issues"]
+    if card_issues:
+        for issue in card_issues:
+            print(issue)
+    else:
+        print("  ✓ No card containment issues detected")
+
+    # 7. Color diffs
+    print("\n" + "=" * 80)
+    print("DIMENSION 7: Color Difference Analysis")
+    print("=" * 80)
+    color_issues = summary["color_diff_issues"]
     if color_issues:
         for issue in color_issues:
             print(issue)
@@ -401,13 +562,13 @@ def main():
     print("\n" + "=" * 80)
     print("FINAL SUMMARY")
     print("=" * 80)
-    total_issues = len(sandbox_overflows) + len(sandbox_overlaps) + len(gap_issues) + len(color_issues)
-    print(f"  Overflow issues:     {len(sandbox_overflows)}")
-    print(f"  Overlap issues:      {len(sandbox_overlaps)}")
+    print(f"  Overflow issues:     {summary['sandbox_overflow_count']}")
+    print(f"  Overlap issues:      {summary['sandbox_overlap_count']}")
     print(f"  Position drift:      see above")
-    print(f"  Element gaps:        {len(gap_issues)}")
-    print(f"  Color differences:   {len(color_issues)}")
-    print(f"  Total actionable:    {total_issues}")
+    print(f"  Element gaps:        {summary['element_gap_count']}")
+    print(f"  Card containment:    {summary['card_containment_count']}")
+    print(f"  Color differences:   {summary['color_diff_count']}")
+    print(f"  Total actionable:    {summary['total_actionable']}")
     print("=" * 80)
 
     return 0

@@ -20,7 +20,7 @@ Export HTML presentations to **editable PPTX** without a browser. Pure Python â€
 ## Usage
 
 ```bash
-python3 scripts/export-sandbox-pptx.py <file.html> [output.pptx] [--width 1440] [--height 810]
+python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810]
 ```
 
 ### Options
