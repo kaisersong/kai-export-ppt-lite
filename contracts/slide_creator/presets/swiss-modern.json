@@ -1,0 +1,93 @@
+{
+  "producer": "slide-creator",
+  "contract_id": "slide-creator/swiss-modern",
+  "preset": "Swiss Modern",
+  "family": "editorial-swiss",
+  "contract_version": "1.0.0",
+  "producer_version_range": ">=2.18.0 <3.0.0",
+  "producer_version_tested": "2.18.0",
+  "contract_source_version": "slide-creator@f4c27c823e65",
+  "upstream_commit": "f4c27c823e659b3de4ea84dd95c1ea1f69797b14",
+  "generated_at": "2026-04-23",
+  "source_refs": [
+    "references/swiss-modern.md",
+    "references/html-template.md"
+  ],
+  "demo_refs": [
+    "demos/swiss-modern-zh.html",
+    "demos/swiss-modern-en.html"
+  ],
+  "runtime_chrome_selectors": [
+    ".progress-bar",
+    ".nav-dots",
+    ".edit-hotzone",
+    ".edit-toggle",
+    "#notes-panel",
+    "#present-btn",
+    "#present-counter"
+  ],
+  "decorative_layers": [],
+  "component_selectors": {
+    "editorial_grid": [
+      ".grid",
+      ".editorial-grid"
+    ],
+    "section_label": [
+      ".swiss-label",
+      ".label",
+      ".eyebrow"
+    ],
+    "card": [
+      ".swiss-card",
+      ".feat-card",
+      ".pain-item"
+    ],
+    "rule": [
+      ".swiss-rule",
+      ".swiss-rule-thin"
+    ],
+    "terminal_line": [
+      ".terminal-line"
+    ]
+  },
+  "component_slot_models": {
+    "card": {
+      "layout": "editorial_card",
+      "slots": [
+        "label",
+        "title",
+        "body",
+        "rule_or_stat"
+      ]
+    },
+    "terminal_line": {
+      "layout": "inline_command_row",
+      "slots": [
+        "command",
+        "label",
+        "link"
+      ]
+    }
+  },
+  "layout_variations": [
+    "editorial-hero",
+    "swiss-grid",
+    "section-divider"
+  ],
+  "text_expectations": {
+    "tabular_numbers": true
+  },
+  "producer_detection": {
+    "body_attrs": {
+      "data-preset": "Swiss Modern",
+      "data-export-progress": "true|false"
+    },
+    "meta_generator_contains": "kai-slide-creator",
+    "watermark_contains": "By kai-slide-creator v"
+  },
+  "observed_component_classes": [
+    "feat-card",
+    "swiss-label",
+    "terminal-line"
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "producer": "slide-creator",
+  "manifest_version": "1.0.0",
+  "generated_at": "2026-04-23",
+  "upstream_repo": "slide-creator",
+  "upstream_commit": "f4c27c823e659b3de4ea84dd95c1ea1f69797b14",
+  "runtime_chrome_selectors": [
+    ".progress-bar",
+    ".nav-dots",
+    ".edit-hotzone",
+    ".edit-toggle",
+    "#notes-panel",
+    "#present-btn",
+    "#present-counter"
+  ],
+  "presets": [
+    {
+      "slug": "blue-sky",
+      "preset": "Blue Sky",
+      "contract_id": "slide-creator/blue-sky",
+      "contract_version": "1.0.0",
+      "family": "bright-card-stack",
+      "producer_version_tested": "2.16.0",
+      "contract_path": "presets/blue-sky.json",
+      "source_refs": [
+        "references/blue-sky-starter.html",
+        "references/html-template.md"
+      ],
+      "demo_refs": [
+        "demos/blue-sky-zh.html",
+        "demos/blue-sky-en.html"
+      ]
+    },
+    {
+      "slug": "enterprise-dark",
+      "preset": "Enterprise Dark",
+      "contract_id": "slide-creator/enterprise-dark",
+      "contract_version": "1.0.0",
+      "family": "consulting-dark",
+      "producer_version_tested": "2.15.0",
+      "contract_path": "presets/enterprise-dark.json",
+      "source_refs": [
+        "references/enterprise-dark.md",
+        "references/html-template.md"
+      ],
+      "demo_refs": [
+        "demos/enterprise-dark-zh.html",
+        "demos/enterprise-dark-en.html"
+      ]
+    },
+    {
+      "slug": "swiss-modern",
+      "preset": "Swiss Modern",
+      "contract_id": "slide-creator/swiss-modern",
+      "contract_version": "1.0.0",
+      "family": "editorial-swiss",
+      "producer_version_tested": "2.18.0",
+      "contract_path": "presets/swiss-modern.json",
+      "source_refs": [
+        "references/swiss-modern.md",
+        "references/html-template.md"
+      ],
+      "demo_refs": [
+        "demos/swiss-modern-zh.html",
+        "demos/swiss-modern-en.html"
+      ]
+    },
+    {
+      "slug": "data-story",
+      "preset": "Data Story",
+      "contract_id": "slide-creator/data-story",
+      "contract_version": "1.0.0",
+      "family": "data-visual-narrative",
+      "producer_version_tested": "2.14.0",
+      "contract_path": "presets/data-story.json",
+      "source_refs": [
+        "references/data-story.md",
+        "references/html-template.md"
+      ],
+      "demo_refs": [
+        "demos/data-story-zh.html",
+        "demos/data-story-en.html"
+      ]
+    }
+  ]
+}

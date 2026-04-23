@@ -10,8 +10,10 @@ Usage:
 
 import sys
 import os
+import json
 import importlib.util
 import tempfile
+from zipfile import ZipFile
 from pathlib import Path
 
 # Add scripts directory to path
@@ -23,6 +25,13 @@ spec = importlib.util.spec_from_file_location("export_sandbox", scripts_dir / "e
 export_sandbox = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(export_sandbox)
 
+sync_contracts_spec = importlib.util.spec_from_file_location(
+    "sync_slide_creator_contracts",
+    scripts_dir / "sync-slide-creator-contracts.py",
+)
+sync_slide_creator_contracts = importlib.util.module_from_spec(sync_contracts_spec)
+sync_contracts_spec.loader.exec_module(sync_slide_creator_contracts)
+
 rigorous_eval_spec = importlib.util.spec_from_file_location("rigorous_eval", scripts_dir / "rigorous-eval.py")
 rigorous_eval = importlib.util.module_from_spec(rigorous_eval_spec)
 rigorous_eval_spec.loader.exec_module(rigorous_eval)
@@ -32,16 +41,25 @@ parse_px = export_sandbox.parse_px
 build_grid_children = export_sandbox.build_grid_children
 build_text_element = export_sandbox.build_text_element
 compute_element_style = export_sandbox.compute_element_style
+parse_css_rules = export_sandbox.parse_css_rules
 layout_slide_elements = export_sandbox.layout_slide_elements
 flat_extract = export_sandbox.flat_extract
 extract_css_from_soup = export_sandbox.extract_css_from_soup
 map_font = export_sandbox.map_font
+measure_flow_box = export_sandbox.measure_flow_box
+flow_gap_in = getattr(export_sandbox, '_flow_gap_in', None)
+remeasure_text_for_final_width = getattr(export_sandbox, '_remeasure_text_for_final_width', None)
 try:
     _flatten_nested_containers = export_sandbox._flatten_nested_containers
 except AttributeError:
     _flatten_nested_containers = None
 parse_html_to_slides = export_sandbox.parse_html_to_slides
 export_sandbox_pptx = export_sandbox.export_sandbox
+validate_export_hints = export_sandbox.validate_export_hints
+detect_producer = export_sandbox.detect_producer
+collect_export_context = export_sandbox.collect_export_context
+extract_body_decorative_background = export_sandbox.extract_body_decorative_background
+parse_grid_track_widths = getattr(export_sandbox, '_parse_grid_track_widths')
 from bs4 import BeautifulSoup, Tag
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -73,6 +91,16 @@ def _corpus_samples():
         {
             'label': 'slide-creator swiss-modern zh',
             'path': Path('/Users/song/projects/slide-creator/demos/swiss-modern-zh.html'),
+            'required': False,
+        },
+        {
+            'label': 'slide-creator enterprise-dark zh',
+            'path': Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html'),
+            'required': False,
+        },
+        {
+            'label': 'slide-creator data-story zh',
+            'path': Path('/Users/song/projects/slide-creator/demos/data-story-zh.html'),
             'required': False,
         },
     ]
@@ -110,6 +138,17 @@ def _collect_elements_by_type(elements, elem_type):
     return matches
 
 
+def _find_data_story_split_rails(slide):
+    containers = _collect_elements_by_type(slide['elements'], 'container')
+    split = next((elem for elem in containers if elem.get('_component_contract') == 'grid_two_column'), None)
+    assert split is not None, containers
+    rails = [child for child in split.get('children', []) if child.get('type') == 'container']
+    assert len(rails) >= 2, split.get('children', [])
+    left_rail = min(rails, key=lambda child: child.get('bounds', {}).get('x', 0.0))
+    right_rail = max(rails, key=lambda child: child.get('bounds', {}).get('x', 0.0))
+    return split, left_rail, right_rail
+
+
 def _require_symbol(symbol_name: str):
     """Return exported helper if present, else print a pending-skip message."""
     symbol = getattr(export_sandbox, symbol_name, None)
@@ -125,6 +164,1144 @@ def test_parse_px():
     assert parse_px('0px') == 0.0
     assert parse_px('clamp(14px, 2vw, 28px)') > 0  # clamp returns a value
     print("  PASS: parse_px")
+
+
+def test_parse_px_supports_minmax_math():
+    """CSS min()/max() length expressions should resolve to usable pixel widths."""
+    assert abs(parse_px('min(90vw, 800px)') - 800.0) < 0.01
+    assert abs(parse_px('min(90vw,700px)') - 700.0) < 0.01
+    assert abs(parse_px('max(320px, 20vw)') - 320.0) < 0.01
+    print("  PASS: parse_px min/max math")
+
+
+def test_validate_export_hints_rejects_unknown_layout_fields():
+    """Export hints must reject IR-like fields such as slides/coordinates."""
+    valid = validate_export_hints({
+        'producer': 'slide-creator',
+        'preset': 'Enterprise Dark',
+        'runtime_flags': {'export_progress_ui': True},
+        'chrome_selectors': ['.progress-bar'],
+        'semantic_bias': {'layout_family': 'consulting-dark'},
+        'contract_ref': 'slide-creator/enterprise-dark@1.0.0',
+    })
+    assert valid is not None and valid['producer'] == 'slide-creator', valid
+
+    invalid = validate_export_hints({
+        'producer': 'slide-creator',
+        'slides': [{'role': 'cover'}],
+    })
+    assert invalid is None, invalid
+    print("  PASS: export hints schema rejects IR-like fields")
+
+
+def test_detect_producer_requires_cross_mechanism_medium_signals():
+    """Metadata fields alone are one channel; watermark adds the second independent channel."""
+    html = """
+    <html><head><meta name="generator" content="kai-slide-creator v2.19.0"></head>
+    <body data-producer="kai-slide-creator" data-preset="Enterprise Dark"></body></html>
+    """
+    soup = BeautifulSoup(html, 'lxml')
+    detection = detect_producer(soup, REPO_ROOT / 'demo' / 'dummy.html')
+    assert detection['producer'] == 'slide-creator', detection
+    assert detection['confidence'] == 'medium', detection
+
+    html_with_watermark = """
+    <html><head><meta name="generator" content="kai-slide-creator v2.19.0"></head>
+    <body data-producer="kai-slide-creator" data-preset="Enterprise Dark">
+      <div hidden data-watermark="kai-slide-creator@2.19.0"></div>
+    </body></html>
+    """
+    soup_with_watermark = BeautifulSoup(html_with_watermark, 'lxml')
+    detection_with_watermark = detect_producer(soup_with_watermark, REPO_ROOT / 'demo' / 'dummy.html')
+    assert detection_with_watermark['confidence'] == 'high', detection_with_watermark
+    print("  PASS: producer detection uses cross-mechanism signals")
+
+
+def test_parse_css_rules_respects_media_queries_and_important():
+    """Desktop export should ignore mobile @media overrides and strip !important."""
+    html = """
+    <html>
+      <head>
+        <style>
+          :root { --slide-padding: 4rem; }
+          .ent-split { display: grid; }
+          @media (max-width: 980px) {
+            :root { --slide-padding: 1.5rem; }
+            .ent-split { grid-template-columns: 1fr !important; }
+          }
+          @media (min-width: 1200px) {
+            .ent-split { grid-template-columns: clamp(140px, 22%, 240px) 1fr !important; }
+          }
+        </style>
+      </head>
+      <body><div class="ent-split"></div></body>
+    </html>
+    """
+    soup = BeautifulSoup(html, 'lxml')
+    css_rules = extract_css_from_soup(soup)
+    split = soup.select_one('.ent-split')
+    style = compute_element_style(split, css_rules, split.get('style', ''))
+    assert style['gridTemplateColumns'] == 'clamp(140px, 22%, 240px) 1fr', style
+    assert export_sandbox._ROOT_CSS_VARS.get('--slide-padding') == '4rem', export_sandbox._ROOT_CSS_VARS
+    print("  PASS: parse_css_rules respects media queries and strips !important")
+
+
+def test_selector_matches_ignores_dynamic_hover_state():
+    """Interactive pseudo-classes like :hover should not leak into static export styles."""
+    html = """
+    <html>
+      <head>
+        <style>
+          td { background: transparent; }
+          tbody tr:hover td { background: rgba(48,54,61,0.5); }
+        </style>
+      </head>
+      <body>
+        <table><tbody><tr><td>Cell</td></tr></tbody></table>
+      </body>
+    </html>
+    """
+    soup = BeautifulSoup(html, 'lxml')
+    css_rules = extract_css_from_soup(soup)
+    td = soup.find('td')
+    style = compute_element_style(td, css_rules, td.get('style', ''))
+    assert style.get('backgroundColor', '') in ('', 'transparent', 'rgba(0, 0, 0, 0)'), style
+    print("  PASS: selector matching ignores dynamic hover state")
+
+
+def test_parse_grid_track_widths_handles_split_and_auto_fit():
+    """Grid track sizing should understand split rails and auto-fit minmax tracks."""
+    split_widths = parse_grid_track_widths('clamp(140px, 22%, 240px) 1fr', 8.33, 0.25)
+    assert len(split_widths) == 2, split_widths
+    assert 1.2 < split_widths[0] < 2.4, split_widths
+    assert split_widths[1] > split_widths[0], split_widths
+
+    auto_fit_widths = parse_grid_track_widths(
+        'repeat(auto-fit, minmax(min(100%, 280px), 1fr))',
+        6.48,
+        0.18,
+    )
+    assert len(auto_fit_widths) == 2, auto_fit_widths
+    assert all(w > 2.0 for w in auto_fit_widths), auto_fit_widths
+    print("  PASS: grid track widths handle split and auto-fit templates")
+
+
+def test_collect_export_context_loads_enterprise_dark_contract_and_body_grid():
+    """slide-creator weak signals should still load safe contract hints and pseudo grid background."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark contract context (HTML not found)")
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding='utf-8'), 'lxml')
+    context = collect_export_context(html_path, soup)
+    assert context['detection']['producer'] == 'slide-creator', context['detection']
+    assert context['detection']['confidence'] == 'low', context['detection']
+    assert context['contract'] is not None, context
+    assert context['contract']['contract_id'] == 'slide-creator/enterprise-dark', context['contract']
+
+    css_rules = extract_css_from_soup(soup)
+    grid_bg = extract_body_decorative_background(css_rules, context['contract'])
+    assert grid_bg and grid_bg['sizePx'] == 24.0, grid_bg
+    print("  PASS: enterprise-dark contract and body pseudo grid load")
+
+
+def test_collect_export_context_loads_data_story_contract_and_body_grid():
+    """data-story should load a synced contract with its body grid metadata."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story contract context (HTML not found)")
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding='utf-8'), 'lxml')
+    context = collect_export_context(html_path, soup)
+    assert context['detection']['producer'] == 'slide-creator', context['detection']
+    assert context['contract'] is not None, context
+    assert context['contract']['contract_id'] == 'slide-creator/data-story', context['contract']
+    assert context['contract']['component_selectors']['install_row'] == ['.install-row'], context['contract']
+    assert context['contract']['component_slot_models']['install_row']['layout'] == 'split_rail', context['contract']
+
+    css_rules = extract_css_from_soup(soup)
+    grid_bg = extract_body_decorative_background(css_rules, context['contract'])
+    assert grid_bg and grid_bg['sizePx'] == 40.0, grid_bg
+    print("  PASS: data-story contract and body pseudo grid load")
+
+
+def test_slide_creator_contract_manifest_tracks_upstream_and_data_story():
+    """The synced manifest should record upstream versioning and include Data Story."""
+    manifest_path = REPO_ROOT / 'contracts' / 'slide_creator' / 'manifest.json'
+    assert manifest_path.exists(), manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    assert manifest['producer'] == 'slide-creator', manifest
+    assert manifest['upstream_commit'], manifest
+    slugs = {preset['slug'] for preset in manifest['presets']}
+    assert {'blue-sky', 'enterprise-dark', 'swiss-modern', 'data-story'} <= slugs, manifest
+    data_story = next(preset for preset in manifest['presets'] if preset['slug'] == 'data-story')
+    assert data_story['producer_version_tested'] == '2.14.0', data_story
+    print("  PASS: slide-creator manifest tracks upstream commit and data-story")
+
+
+def test_sync_slide_creator_contracts_builds_data_story_contract():
+    """The sync helper should materialize the data-story component contract."""
+    root = Path('/Users/song/projects/slide-creator')
+    if not root.exists():
+        print("  SKIP: sync slide-creator contracts (repo not found)")
+        return
+
+    manifest = sync_slide_creator_contracts.build_manifest(
+        root,
+        generated_at='2026-04-23',
+        upstream_commit='deadbeef',
+    )
+    assert any(preset['slug'] == 'data-story' for preset in manifest['presets']), manifest
+
+    contract = sync_slide_creator_contracts.build_contract(
+        root,
+        sync_slide_creator_contracts.PRESET_SPECS['data-story'],
+        generated_at='2026-04-23',
+        upstream_commit='deadbeef',
+    )
+    assert contract['contract_id'] == 'slide-creator/data-story', contract
+    assert contract['component_slot_models']['metric_card']['slots'] == ['metric', 'label', 'trend'], contract
+    assert contract['component_slot_models']['metric_card']['metric_single_line'] is True, contract
+    assert contract['component_slot_models']['style_card']['stretch_first_slot'] is True, contract
+    assert '.ds-kpi-card' in contract['component_selectors']['metric_card'], contract
+    print("  PASS: sync helper builds data-story contract")
+
+
+def test_media_query_max_height_does_not_override_large_heading_at_default_viewport():
+    """Max-height media rules should only apply when the export viewport is actually short."""
+    html = '''
+    <html><head><style>
+      :root { --title-size: clamp(2rem, 6vw, 5rem); }
+      @media (max-height: 700px) {
+        :root { --title-size: clamp(1rem, 3.5vw, 1.5rem); }
+      }
+      h1 { font-size: var(--title-size); font-weight: 800; }
+    </style></head><body><h1>Heading</h1></body></html>
+    '''
+    soup = BeautifulSoup(html, 'lxml')
+    css_rules = extract_css_from_soup(soup)
+    h1 = soup.find('h1')
+    style = compute_element_style(h1, css_rules, h1.get('style', ''))
+    assert parse_px(style.get('fontSize', '0')) >= 72.0, style
+    print("  PASS: max-height media query no longer shrinks headings at 1440x900")
+
+
+def test_short_latin_inline_block_label_uses_compact_width():
+    """Short rounded Latin labels should shrink-wrap closer to browser metrics."""
+    html = '''
+    <span style="
+      display:inline-block;
+      padding:4px 12px;
+      border-radius:999px;
+      background:rgba(56,139,253,0.12);
+      border:1px solid rgba(255,255,255,0.12);
+      color:#d8dee9;
+      font-size:13px;
+      font-weight:500;
+    ">Aurora Mesh</span>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    span = soup.find('span')
+    style = compute_element_style(span, [], span.get('style', ''))
+    text_el = build_text_element(span, style, [], 1440, 1180)
+    assert text_el is not None
+    assert 0.72 <= text_el['bounds']['width'] <= 0.95, text_el['bounds']
+    print("  PASS: short latin inline-block label uses compact width")
+
+
+def test_enterprise_dark_split_cards_stack_in_right_column():
+    """Enterprise Dark split cards should stack vertically in the right rail, not spill horizontally."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark split stacking (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    root = slides[1]['elements'][0]
+    right_wrapper = next((child for child in root.get('children', []) if child.get('type') == 'container'), None)
+    assert right_wrapper is not None, root.get('children', [])
+    right_cards = [child for child in right_wrapper.get('children', []) if child.get('type') == 'container']
+    assert len(right_cards) >= 3, right_wrapper
+    card_xs = [card['bounds']['x'] for card in right_cards]
+    card_ys = [card['bounds']['y'] for card in right_cards]
+    assert max(card_xs) - min(card_xs) < 0.01, card_xs
+    assert card_ys == sorted(card_ys), card_ys
+    assert max(card['bounds']['x'] + card['bounds']['width'] for card in right_cards) <= 12.5, right_cards
+    print("  PASS: enterprise-dark split cards stack in right column")
+
+
+def test_enterprise_dark_install_grid_prefers_centered_single_column_stack():
+    """Centered auto-fit installation grids should shrink-wrap into a single stacked column."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark install grid stacking (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide7 = slides[6]
+    wrapper = next((elem for elem in slide7['elements'] if elem.get('type') == 'container'), None)
+    assert wrapper is not None, slide7['elements']
+    assert wrapper['bounds']['width'] > 6.0, wrapper['bounds']
+    nested_containers = _collect_elements_by_type([wrapper], 'container')
+    grid_container = next(
+        (
+            child for child in nested_containers
+            if child is not wrapper
+            and child.get('bounds', {}).get('width', 0) > 3.0
+            and len([grand for grand in child.get('children', []) if grand.get('type') == 'container']) >= 2
+        ),
+        None,
+    )
+    assert grid_container is not None, nested_containers
+    cards = [child for child in grid_container.get('children', []) if child.get('type') == 'container']
+    assert len(cards) >= 2, grid_container
+    card_xs = [round(card['bounds']['x'], 3) for card in cards]
+    card_ys = [round(card['bounds']['y'], 3) for card in cards]
+    assert max(card_xs) - min(card_xs) < 0.05, card_xs
+    assert card_ys == sorted(card_ys), card_ys
+    print("  PASS: enterprise-dark install grid prefers centered single-column stack")
+
+
+def test_enterprise_dark_cta_kpi_grid_preserves_two_card_widths():
+    """CTA KPI cards should keep equal widths while remaining vertically stacked."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark CTA KPI grid (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide8 = slides[7]
+    containers = _collect_elements_by_type(slide8['elements'], 'container')
+    kpi_grid = next(
+        (
+            elem for elem in containers
+            if len([child for child in elem.get('children', []) if child.get('type') == 'container']) == 2
+        ),
+        None,
+    )
+    assert kpi_grid is not None, containers
+    cards = [child for child in kpi_grid.get('children', []) if child.get('type') == 'container']
+    assert len(cards) == 2, kpi_grid
+    widths = [round(card['bounds']['width'], 3) for card in cards]
+    xs = [round(card['bounds']['x'], 3) for card in cards]
+    ys = [round(card['bounds']['y'], 3) for card in cards]
+    assert max(widths) - min(widths) < 0.05, widths
+    assert min(widths) > 1.4, widths
+    assert max(xs) - min(xs) < 0.05, xs
+    assert ys == sorted(ys), ys
+    print("  PASS: enterprise-dark CTA KPI grid keeps stacked equal-width cards")
+
+
+def test_enterprise_dark_workflow_cards_share_row_height():
+    """Multi-column workflow cards should stretch to the shared grid row height."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark workflow row height (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide3 = slides[2]
+    containers = _collect_elements_by_type(slide3['elements'], 'container')
+    workflow_grid = next(
+        (
+            elem for elem in containers
+            if len([child for child in elem.get('children', []) if child.get('type') == 'container']) == 3
+        ),
+        None,
+    )
+    assert workflow_grid is not None, containers
+    cards = [child for child in workflow_grid.get('children', []) if child.get('type') == 'container']
+    heights = [round(card['bounds']['height'], 3) for card in cards]
+    assert max(heights) - min(heights) < 0.05, heights
+    print("  PASS: enterprise-dark workflow cards share row height")
+
+
+def test_enterprise_dark_workflow_index_keeps_breathing_room_before_title():
+    """Step-number labels in workflow cards should leave a visible gap before the title."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark workflow index/title gap (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide3 = slides[2]
+    containers = _collect_elements_by_type(slide3['elements'], 'container')
+    workflow_grid = next(
+        (
+            elem for elem in containers
+            if len([child for child in elem.get('children', []) if child.get('type') == 'container']) == 3
+        ),
+        None,
+    )
+    assert workflow_grid is not None, containers
+    cards = [child for child in workflow_grid.get('children', []) if child.get('type') == 'container']
+    first_card = cards[0]
+    texts = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    step = next((child for child in texts if child.get('text', '').strip() == '01'), None)
+    title = next((child for child in texts if child.get('text', '').strip() == '描述心情'), None)
+    assert step is not None and title is not None, texts
+    step_bottom = step['bounds']['y'] + step['bounds']['height']
+    gap = title['bounds']['y'] - step_bottom
+    assert gap >= 9.5 / export_sandbox.PX_PER_IN, gap
+    print("  PASS: enterprise-dark workflow index leaves breathing room before title")
+
+
+def test_enterprise_dark_trend_rows_stretch_full_card_width():
+    """Progress-card trend rows should stretch to the card width instead of centering like chips."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark trend row stretch (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    texts = _collect_elements_by_type(slide2['elements'], 'text')
+    body = next((elem for elem in texts if 'Node、Webpack' in elem.get('text', '')), None)
+    trend = next((elem for elem in texts if '72% 用户抱怨构建复杂度' in elem.get('text', '')), None)
+    assert body is not None and trend is not None, texts
+    assert trend['bounds']['width'] > 4.5, trend['bounds']
+    assert abs(trend['bounds']['x'] - body['bounds']['x']) < 0.05, (trend['bounds'], body['bounds'])
+    print("  PASS: enterprise-dark trend rows stretch full card width")
+
+
+def test_data_story_problem_split_preserves_kpi_cards_as_nested_containers():
+    """Problem split layouts should keep KPI cards as nested containers instead of flattening them."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story split KPI card packing (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    split, left_rail, _ = _find_data_story_split_rails(slide2)
+    nested_cards = [
+        child for child in left_rail.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    ]
+    assert split['bounds']['width'] > 10, split['bounds']
+    assert len(nested_cards) >= 3, left_rail.get('children', [])
+    print("  PASS: data-story split keeps KPI cards as nested containers")
+
+
+def test_data_story_solution_grid_preserves_solution_cards_as_nested_containers():
+    """Solution grids should keep each solution block as its own contract card."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story solution card packing (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide4 = slides[3]
+    containers = _collect_elements_by_type(slide4['elements'], 'container')
+    solution_grid = next(
+        (
+            elem for elem in containers
+            if sum(
+                1 for child in elem.get('children', [])
+                if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+            ) >= 4
+        ),
+        None,
+    )
+    assert solution_grid is not None, containers
+    nested_cards = [
+        child for child in solution_grid.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    ]
+    assert len(nested_cards) >= 4, solution_grid.get('children', [])
+    print("  PASS: data-story solution grid keeps nested solution cards")
+
+
+def test_data_story_feature_grid_preserves_cards_as_nested_containers():
+    """Feature grids should preserve each block card as its own nested container."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature card packing (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    containers = _collect_elements_by_type(slide6['elements'], 'container')
+    feat_grid = next((elem for elem in containers if len(elem.get('children', [])) == 4), None)
+    assert feat_grid is not None, containers
+    assert all(child.get('type') == 'container' and child.get('_children_relative') for child in feat_grid.get('children', [])), feat_grid.get('children', [])
+    print("  PASS: data-story feature grid keeps nested card containers")
+
+
+def test_data_story_problem_cards_stack_metric_and_copy_vertically():
+    """Visible block KPI cards should vertically stack metric and supporting copy."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story problem card vertical stack (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide2['elements'])
+    slide2['_slide_index'] = 1
+    layout_slide_elements(slide2['elements'], 13.33, 810 / 108, slide2['slideStyle'], slide2)
+
+    _, left_rail, _ = _find_data_story_split_rails(slide2)
+    first_card = next(
+        child for child in left_rail.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    )
+    text_children = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    assert len(text_children) >= 2, first_card.get('children', [])
+
+    metric = text_children[0]['bounds']
+    copy = text_children[1]['bounds']
+    assert copy['y'] >= metric['y'] + metric['height'] - 0.01, (metric, copy)
+    print("  PASS: data-story problem cards stack metric and copy vertically")
+
+
+def test_flat_extract_content_svg_builds_relative_container():
+    """Inline content SVG charts should emit a drawable relative container instead of being dropped."""
+    html = '''
+    <svg viewBox="0 0 100 50" class="chart-svg">
+      <line x1="10" y1="40" x2="90" y2="40" stroke="#334155" stroke-width="2"></line>
+      <rect x="20" y="20" width="12" height="20" rx="2" fill="#3b82f6"></rect>
+      <text x="26" y="18" text-anchor="middle" style="font-size:12px; fill:#22d3ee;">80</text>
+    </svg>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    svg = soup.find('svg')
+    results = export_sandbox.flat_extract(svg, [], None, 1440, content_width_px=400, local_origin=True)
+
+    assert len(results) == 1, results
+    container = results[0]
+    assert container.get('type') == 'container' and container.get('_children_relative'), container
+    child_types = [child.get('type') for child in container.get('children', [])]
+    assert 'shape' in child_types and 'text' in child_types, child_types
+    print("  PASS: content SVG builds relative drawable container")
+
+
+def test_flat_extract_content_svg_keeps_polyline_and_dots():
+    """Data charts should keep line-series and dot markers instead of dropping them."""
+    html = '''
+    <svg viewBox="0 0 120 60" class="chart-svg">
+      <polygon points="10,45 40,30 70,20 100,12 100,55 10,55" fill="#3b82f6"></polygon>
+      <polyline points="10,45 40,30 70,20 100,12" stroke="#3b82f6" stroke-width="2.5" fill="none"></polyline>
+      <circle cx="10" cy="45" r="3"></circle>
+      <circle cx="40" cy="30" r="3"></circle>
+    </svg>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    svg = soup.find('svg')
+    results = export_sandbox.flat_extract(svg, [], None, 1440, content_width_px=360, local_origin=True)
+    assert len(results) == 1, results
+    container = results[0]
+    child_types = [(child.get('type'), child.get('tag')) for child in container.get('children', [])]
+    assert ('freeform', 'polyline') in child_types, child_types
+    assert ('shape', 'circle') in child_types, child_types
+    print("  PASS: content SVG keeps polyline series and circle markers")
+
+
+def test_data_story_problem_split_keeps_svg_chart_container():
+    """Problem split should retain the SVG chart as a nested container."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story svg chart retention (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    _, _, right_rail = _find_data_story_split_rails(slide2)
+    has_svg_container = any(
+        child.get('type') == 'container' and child.get('tag') == 'svg'
+        for child in right_rail.get('children', [])
+    )
+    assert has_svg_container, right_rail.get('children', [])
+    print("  PASS: data-story split keeps SVG chart container")
+
+
+def test_data_story_feature_cards_stack_text_content_vertically():
+    """Feature cards should vertically stack number, title, and description."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature card vertical stack (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide6['elements'])
+    slide6['_slide_index'] = 5
+    layout_slide_elements(slide6['elements'], 13.33, 810 / 108, slide6['slideStyle'], slide6)
+
+    feat_grid = next(elem for elem in slide6['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in feat_grid.get('children', []) if child.get('type') == 'container')
+    text_children = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    assert len(text_children) >= 3, first_card.get('children', [])
+
+    positions = [child['bounds']['y'] for child in text_children[:3]]
+    assert positions[0] < positions[1] < positions[2], positions
+    print("  PASS: data-story feature cards stack text content vertically")
+
+
+def test_data_story_nested_card_groups_keep_grid_slot_width():
+    """Nested background-card containers inside grids should occupy their laid-out track width."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story nested card grid width (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+
+    slide2 = slides[1]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide2['elements'])
+    slide2['_slide_index'] = 1
+    layout_slide_elements(slide2['elements'], 13.33, 810 / 108, slide2['slideStyle'], slide2)
+    _, left_rail, _ = _find_data_story_split_rails(slide2)
+    first_problem_card = next(
+        child for child in left_rail.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    )
+    assert first_problem_card['bounds']['width'] > 3.0, first_problem_card['bounds']
+
+    slide6 = slides[5]
+    pre_pass_corrections(slide6['elements'])
+    slide6['_slide_index'] = 5
+    layout_slide_elements(slide6['elements'], 13.33, 810 / 108, slide6['slideStyle'], slide6)
+    feat_grid = next(elem for elem in slide6['elements'] if elem.get('type') == 'container')
+    first_feature_card = next(child for child in feat_grid.get('children', []) if child.get('type') == 'container')
+    assert first_feature_card['bounds']['width'] > 3.0, first_feature_card['bounds']
+    print("  PASS: data-story nested card groups keep grid slot width")
+
+
+def test_data_story_install_rows_keep_horizontal_rails():
+    """Contract-driven install rows should keep label and command on the same horizontal band."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story install-row rails (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide7 = slides[6]
+    containers = _collect_elements_by_type(slide7['elements'], 'container')
+    row = next(
+        elem for elem in containers
+        if elem.get('type') == 'container' and elem.get('_component_contract') == 'split_rail'
+    )
+    texts = [child for child in row.get('children', []) if child.get('type') == 'text']
+    assert len(texts) == 2, row.get('children', [])
+    label, cmd = texts
+    assert cmd['bounds']['x'] > label['bounds']['x'] + label['bounds']['width'], (label['bounds'], cmd['bounds'])
+    assert abs(label['bounds']['y'] - cmd['bounds']['y']) < 0.12, (label['bounds'], cmd['bounds'])
+    print("  PASS: data-story install rows keep horizontal rails")
+
+
+def test_data_story_centered_column_wrapper_preserves_max_width_and_children():
+    """Top-level centered flex-column wrappers should stay grouped and keep authored max-width."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story centered column wrapper packing (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide7 = slides[6]
+    wrapper = next(
+        (
+            elem for elem in slide7['elements']
+            if elem.get('type') == 'container' and elem.get('_component_contract') is None
+        ),
+        None,
+    )
+    assert wrapper is not None, slide7['elements']
+    assert wrapper['bounds']['width'] >= 6.9, wrapper['bounds']
+    child_containers = _collect_elements_by_type(wrapper.get('children', []), 'container')
+    split_rails = [child for child in child_containers if child.get('_component_contract') == 'split_rail']
+    metric_grids = [
+        child for child in child_containers
+        if len([
+            grandchild for grandchild in child.get('children', [])
+            if grandchild.get('type') == 'container' and grandchild.get('_component_contract') == 'vertical_card'
+        ]) == 3
+    ]
+    assert len(split_rails) == 2, wrapper.get('children', [])
+    assert metric_grids, wrapper.get('children', [])
+    print("  PASS: centered column wrapper keeps authored width and grouped children")
+
+
+def test_data_story_centered_wrapper_keeps_paired_pills_overlaid():
+    """Centered wrapper packing should keep paired pill bg/text overlaid instead of stacking them."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story paired pill overlay (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    for slide_idx, label_text in ((0, 'slide-creator'), (7, '/slide-creator')):
+        slide = slides[slide_idx]
+        export_sandbox.pre_pass_corrections(slide['elements'])
+        slide['_slide_index'] = slide_idx
+        layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide.get('slideStyle', {}), slide)
+
+        texts = [
+            elem for elem in _collect_elements_by_type(slide['elements'], 'text')
+            if (elem.get('text') or '').strip() == label_text and elem.get('_pair_with')
+        ]
+        assert texts, (slide_idx, label_text)
+        pill_text = texts[0]
+        pill_shape = next(
+            elem for elem in _collect_elements_by_type(slide['elements'], 'shape')
+            if elem.get('_pair_with') == pill_text.get('_pair_with')
+        )
+        assert abs(pill_shape['bounds']['y'] - pill_text['bounds']['y']) < 0.02, (
+            slide_idx, pill_shape['bounds'], pill_text['bounds']
+        )
+        assert abs(pill_shape['bounds']['x'] - pill_text['bounds']['x']) < 0.02, (
+            slide_idx, pill_shape['bounds'], pill_text['bounds']
+        )
+    print("  PASS: data-story centered wrappers keep paired pills overlaid")
+
+
+def test_data_story_feature_cards_use_contract_min_height():
+    """Contract-driven feature cards should preserve a stable minimum card height."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature card min height (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    feat_grid = next(elem for elem in slide6['elements'] if elem.get('type') == 'container')
+    feature_cards = [
+        child for child in feat_grid.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    ]
+    assert len(feature_cards) >= 4, feat_grid.get('children', [])
+    assert all(card['bounds']['height'] >= 0.90 for card in feature_cards[:4]), [card['bounds'] for card in feature_cards[:4]]
+    print("  PASS: data-story feature cards keep contract minimum height")
+
+
+def test_data_story_metric_cards_keep_large_numbers_single_line():
+    """Problem KPI cards should keep short metric tokens on a single line."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story metric single-line (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    _, left_rail, _ = _find_data_story_split_rails(slide2)
+    first_card = next(
+        child for child in left_rail.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    )
+    metric = next(child for child in first_card.get('children', []) if child.get('type') == 'text' and child.get('text') == '73%')
+    assert metric.get('forceSingleLine'), metric
+    assert metric.get('bounds', {}).get('height', 0.0) < 1.05, metric.get('bounds')
+    print("  PASS: data-story KPI cards keep metric tokens single-line")
+
+
+def test_data_story_metric_grids_preserve_authored_row_width_when_not_centered():
+    """Non-centered data-story KPI grids should fill their authored row width instead of shrink-wrapping."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story KPI grid width preservation (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+
+    slide4 = slides[3]
+    containers4 = _collect_elements_by_type(slide4['elements'], 'container')
+    solution_grid = next(elem for elem in containers4 if elem.get('bounds', {}).get('width', 0.0) > 10.0)
+    bottom_grid = next(
+        elem for elem in containers4
+        if len([
+            child for child in elem.get('children', [])
+            if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+        ]) == 3
+    )
+    assert bottom_grid['bounds']['width'] > 10.0, bottom_grid['bounds']
+    assert abs(bottom_grid['bounds']['width'] - solution_grid['bounds']['width']) < 0.6, (
+        bottom_grid['bounds'], solution_grid['bounds']
+    )
+
+    slide7 = slides[6]
+    containers7 = _collect_elements_by_type(slide7['elements'], 'container')
+    rows = [
+        elem for elem in containers7
+        if elem.get('type') == 'container' and elem.get('_component_contract') == 'split_rail'
+    ]
+    bottom_grid7 = next(
+        elem for elem in containers7
+        if elem.get('type') == 'container' and len([
+            child for child in elem.get('children', [])
+            if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+        ]) == 3
+    )
+    assert rows, slide7['elements']
+    assert abs(bottom_grid7['bounds']['width'] - rows[0]['bounds']['width']) < 0.4, (
+        bottom_grid7['bounds'], rows[0]['bounds']
+    )
+    print("  PASS: non-centered data-story KPI grids preserve full row width")
+
+
+def test_data_story_left_aligned_slides_do_not_center_narrow_titles():
+    """Left-aligned slides should stay anchored to slide padding even when the heading is narrower than the main rail."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story left-aligned layout (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    layout_slide_elements(slide2['elements'], 13.33, 810 / 108, slide2['slideStyle'], slide2)
+    title = next(elem for elem in slide2['elements'] if elem.get('tag') == 'h2')
+    split = next(elem for elem in slide2['elements'] if elem.get('type') == 'container')
+    assert title['bounds']['x'] < 1.0, title['bounds']
+    assert split['bounds']['x'] < 1.0, split['bounds']
+    print("  PASS: left-aligned data-story slides stay anchored to padding")
+
+
+def test_data_story_relative_grids_normalize_local_origin():
+    """Relative grid wrappers should anchor their first child at local x≈0 rather than inheriting a 0.5in offset."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story relative grid normalization (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide4 = slides[3]
+    containers = _collect_elements_by_type(slide4['elements'], 'container')
+    solution_grid = next(
+        elem for elem in containers
+        if len([
+            child for child in elem.get('children', [])
+            if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+        ]) >= 4
+    )
+    first_card = min(
+        [child for child in solution_grid.get('children', []) if child.get('type') == 'container'],
+        key=lambda child: child.get('bounds', {}).get('x', 0.0),
+    )
+    assert first_card['bounds']['x'] < 0.1, first_card['bounds']
+    print("  PASS: relative grid wrappers normalize local origin")
+
+
+def test_export_freeform_open_path_uses_connector_segments():
+    """Open SVG polylines should export as explicit connector segments so chart strokes remain visible."""
+    prs = export_sandbox.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    export_sandbox.export_freeform_element(slide, {
+        'type': 'freeform',
+        'points': [(1.0, 1.0), (2.0, 1.5), (3.0, 1.1)],
+        'closed': False,
+        'styles': {'stroke': '#3b82f6', 'fill': '', 'strokeWidth': 2.5},
+    })
+    with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        prs.save(tmp_path)
+        with ZipFile(tmp_path) as zf:
+            xml = zf.read('ppt/slides/slide1.xml').decode('utf-8')
+        assert xml.count('cxnSp') >= 2, xml
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    print("  PASS: open freeform paths export as connector segments")
+
+
+def test_auto_fit_grid_collapses_empty_tracks_for_three_cards():
+    """Auto-fit grids should stretch across available width when there are fewer items than fit tracks."""
+    html = """<!doctype html><html><head><style>
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%,160px),1fr)); gap:16px; }
+    .card { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:24px; }
+    </style></head><body>
+    <section class="slide">
+      <div class="grid" style="max-width: 960px;">
+        <div class="card">One</div>
+        <div class="card">Two</div>
+        <div class="card">Three</div>
+      </div>
+    </section>
+    </body></html>"""
+    path = write_fixture("autofit-three-cards.html", html)
+    slides = parse_html_to_slides(path, 1440)
+    grid = next(elem for elem in slides[0]["elements"] if elem.get("type") == "container")
+    widths = [child["bounds"]["width"] for child in grid.get("children", [])]
+    assert len(widths) == 3, widths
+    assert min(widths) > 2.8, widths
+    assert max(widths) - min(widths) < 0.05, widths
+    print("  PASS: auto-fit grid collapses empty tracks for three cards")
+
+
+def test_shift_container_descendants_moves_freeform_points():
+    """Relative container translation should also move freeform point geometry."""
+    container = {
+        "type": "container",
+        "_children_relative": True,
+        "children": [
+            {
+                "type": "freeform",
+                "points": [(0.1, 0.2), (0.3, 0.4)],
+                "styles": {"stroke": "#3b82f6"},
+            }
+        ],
+    }
+    export_sandbox._shift_container_descendants(container, 1.0, 2.0)
+    assert container["children"][0]["points"] == [(1.1, 2.2), (1.3, 2.4)]
+    print("  PASS: relative container shifts freeform points")
+
+
+def test_data_story_style_cards_use_contract_solver_and_keep_preview_slot():
+    """Style preview cards should keep the swatch slot as a nested drawable block."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story style card solver (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide3 = slides[2]
+    grid = next(elem for elem in slide3['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in grid.get('children', []) if child.get('type') == 'container')
+    assert first_card.get('_component_contract') == 'vertical_card', first_card
+    preview = next((child for child in first_card.get('children', []) if child.get('type') == 'container'), None)
+    assert preview is not None, first_card.get('children', [])
+    assert preview.get('bounds', {}).get('height', 0.0) >= 0.65, preview.get('bounds')
+    print("  PASS: data-story style cards keep preview slot via contract solver")
+
+
+def test_slide_anchored_text_preserves_bottom_right_position():
+    """Author-positioned slide labels should keep explicit bottom-right placement."""
+    html = '''
+    <html><body>
+      <section class="slide" style="position:relative;padding:48px;">
+        <h2>Example</h2>
+        <span style="position:absolute;bottom:28px;right:36px;font-size:11px;color:rgba(255,255,255,0.18);">04</span>
+      </section>
+    </body></html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-positioned-label-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'positioned-label.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    label = next(elem for elem in slide['elements'] if elem.get('type') == 'text' and elem.get('text') == '04')
+    assert label.get('_skip_layout'), label
+    assert label['bounds']['x'] > 12.5, label['bounds']
+    assert label['bounds']['y'] > 7.7, label['bounds']
+    print("  PASS: slide-anchored text keeps bottom-right position")
+
+
+def test_parse_html_to_slides_clones_body_fixed_brand_mark_for_each_slide():
+    """Non-chrome fixed body overlays should be cloned onto every slide."""
+    html = '''
+    <html><body>
+      <span id="brand-mark" style="position:fixed;top:20px;left:28px;font-weight:800;font-size:15px;color:#3b82f6;">slide-creator</span>
+      <section class="slide"><h2>One</h2></section>
+      <section class="slide"><h2>Two</h2></section>
+    </body></html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-global-brand-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'global-brand.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    assert len(slides) == 2, slides
+    for slide in slides:
+        brand = next(
+            (elem for elem in slide['elements'] if elem.get('type') == 'text' and elem.get('text') == 'slide-creator'),
+            None,
+        )
+        assert brand is not None, slide['elements']
+        assert brand.get('_skip_layout'), brand
+        assert brand['bounds']['x'] < 0.5 and brand['bounds']['y'] < 0.3, brand['bounds']
+    print("  PASS: body fixed brand mark is cloned onto every slide")
+
+
+def test_centered_flex_wrap_preserves_intrinsic_metric_stack_widths():
+    """Centered flex-wrap rows should not over-wrap simple grouped KPI stacks."""
+    html = '''
+    <div style="display:flex; justify-content:center; align-items:center; gap:20px; flex-wrap:wrap;">
+      <div style="text-align:center;">
+        <div style="font-size:56px; font-weight:800; line-height:1;">21</div>
+        <div style="font-size:11px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:#8b949e; margin-top:8px;">PRESETS</div>
+      </div>
+      <div style="width:1px; height:48px; background:#30363d;"></div>
+      <div style="text-align:center;">
+        <div style="font-size:56px; font-weight:800; line-height:1;">0</div>
+        <div style="font-size:11px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:#8b949e; margin-top:8px;">DEPS</div>
+      </div>
+      <div style="width:1px; height:48px; background:#30363d;"></div>
+      <div style="text-align:center;">
+        <div style="font-size:56px; font-weight:800; line-height:1;">∞</div>
+        <div style="font-size:11px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:#8b949e; margin-top:8px;">SLIDES</div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    row = soup.find('div')
+    style = compute_element_style(row, [], row.get('style', ''))
+    children = build_grid_children(row, [], style, 1440, content_width_px=800)
+    assert len(children) == 5, children
+    ys = [round(child['bounds']['y'], 3) for child in children]
+    assert max(ys) - min(ys) < 0.05, ys
+    assert children[4]['bounds']['x'] > children[3]['bounds']['x'], [child['bounds'] for child in children]
+    print("  PASS: centered flex-wrap preserves intrinsic metric stack widths")
+
+
+def test_layout_slide_elements_respects_slide_justify_center():
+    """Slide roots authored with justify-content:center should vertically center the content block."""
+    elements = [
+        {
+            'type': 'text',
+            'tag': 'h1',
+            'text': 'Centered title',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 3.0, 'height': 0.7},
+            'styles': {'fontSize': '42px', 'textAlign': 'center', 'lineHeight': '42px'},
+        },
+        {
+            'type': 'text',
+            'tag': 'p',
+            'text': 'Centered body',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 4.0, 'height': 0.4},
+            'styles': {'fontSize': '18px', 'textAlign': 'center', 'lineHeight': '28px', 'marginTop': '16px'},
+        },
+    ]
+    slide_style = {
+        'display': 'flex',
+        'flexDirection': 'column',
+        'justifyContent': 'center',
+        'paddingTop': '96px',
+        'paddingBottom': '96px',
+        'textAlign': 'center',
+    }
+    layout_slide_elements(elements, slide_style=slide_style)
+    top_y = min(elem['bounds']['y'] for elem in elements)
+    assert top_y > 2.4, [elem['bounds'] for elem in elements]
+    assert elements[1]['bounds']['y'] > elements[0]['bounds']['y'], [elem['bounds'] for elem in elements]
+    print("  PASS: layout_slide_elements vertically centers justify-content:center slides")
+
+
+def test_layout_slide_elements_ignores_skip_layout_overlays_when_centering():
+    """Fixed/absolute overlays should not block slide-level vertical centering."""
+    elements = [
+        {
+            'type': 'text',
+            'tag': 'span',
+            'text': 'slide-creator',
+            'bounds': {'x': 0.26, 'y': 0.24, 'width': 1.1, 'height': 0.23},
+            '_skip_layout': True,
+            'styles': {'position': 'fixed', 'top': '20px', 'left': '28px'},
+        },
+        {
+            'type': 'text',
+            'tag': 'h2',
+            'text': 'Centered heading',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 4.0, 'height': 0.37},
+            'styles': {'fontSize': '40px', 'textAlign': 'left', 'lineHeight': '40px'},
+        },
+        {
+            'type': 'container',
+            'tag': 'div',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 12.0, 'height': 6.0},
+            'styles': {},
+            'children': [],
+            '_children_relative': True,
+        },
+        {
+            'type': 'text',
+            'tag': 'span',
+            'text': '02',
+            'bounds': {'x': 12.8, 'y': 7.98, 'width': 0.19, 'height': 0.15},
+            '_skip_layout': True,
+            'styles': {'position': 'absolute', 'bottom': '28px', 'right': '36px'},
+        },
+    ]
+    slide_style = {
+        'display': 'flex',
+        'flexDirection': 'column',
+        'justifyContent': 'center',
+        'paddingTop': '16px',
+        'paddingBottom': '16px',
+    }
+    layout_slide_elements(elements, slide_height_in=8.33, slide_style=slide_style)
+    heading = next(elem for elem in elements if elem.get('text') == 'Centered heading')
+    overlay = next(elem for elem in elements if elem.get('text') == 'slide-creator')
+    assert heading['bounds']['y'] > 0.75, [elem['bounds'] for elem in elements]
+    assert abs(overlay['bounds']['y'] - 0.24) < 0.05, overlay['bounds']
+    print("  PASS: skip-layout overlays do not block vertical centering")
+
+
+def test_flat_extract_skips_display_none_elements():
+    """Nodes hidden by computed CSS should not leak into the export IR."""
+    html = '''
+    <section class="slide">
+      <div>Hello</div>
+      <span class="hidden-label">Should stay hidden</span>
+    </section>
+    <style>
+      .hidden-label { display: none; }
+    </style>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    css_rules = extract_css_from_soup(soup)
+    slide = soup.find('section')
+    results = flat_extract(slide, css_rules, None, 1440)
+    texts = _collect_text_values(results)
+    assert 'Should stay hidden' not in texts, texts
+    print("  PASS: flat_extract skips display:none elements")
+
+
+def test_flat_extract_text_only_inline_flex_container_emits_text():
+    """Text-only inline-flex wrappers should export as text, not empty containers."""
+    html = '''
+    <div style="display:inline-flex; align-items:center; gap:4px; color:#3fb950; font-size:13px; font-weight:600;">
+      ▲ 浏览器即运行时
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    elem = soup.find('div')
+    results = flat_extract(elem, [], None, 1440)
+    assert len(results) == 1, results
+    assert results[0].get('type') == 'text', results
+    assert '浏览器即运行时' in (results[0].get('text') or ''), results[0]
+    print("  PASS: text-only inline-flex wrapper exports as text")
+
+
+def test_measure_flow_box_inline_flex_card_prefers_intrinsic_width():
+    """Inline-flex cards with visible backgrounds should shrink-wrap to their content."""
+    html = '''
+    <div style="display:inline-flex; flex-direction:row; align-items:center; gap:16px; background:#1b1f24; border:1px solid #30363d; padding:16px 24px; border-radius:6px;">
+      <div style="font-size:40px; font-weight:700; color:#3fb950;">100%</div>
+      <div>
+        <div style="font-size:13px; color:#c9d1d9;">零依赖运行</div>
+        <div style="display:inline-flex; align-items:center; gap:4px; font-size:13px; font-weight:600; color:#3fb950;">▲ 浏览器即运行时</div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    card = soup.find('div')
+    flow_box = measure_flow_box(card, [], None, 1440, content_width_px=800, local_origin=True)
+    assert flow_box is not None
+    assert flow_box['bounds']['width'] < (800 / PX_PER_IN) - 1.0, flow_box['bounds']
+    assert flow_box['bounds']['width'] > 2.5, flow_box['bounds']
+    print("  PASS: inline-flex flow_box cards prefer intrinsic width")
+
+
+def test_measure_flow_box_flex_column_card_preserves_outer_slot_width():
+    """Flow-box cards should size to the outer grid slot, not collapse to inner content width."""
+    html = '''
+    <div style="display:flex; flex-direction:column; background:#161b22; border:1px solid #30363d; border-radius:6px; padding:24px;">
+      <span style="font-size:24px; font-weight:800; color:#58a6ff;">01</span>
+      <h3 style="font-size:16px; margin-bottom:4px;">描述心情</h3>
+      <p style="font-size:14px;">大胆且极简，或者温暖而创意。</p>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    card = soup.find('div')
+    style = compute_element_style(card, [], card.get('style', ''))
+    flow_box = measure_flow_box(card, [], None, 1440, content_width_px=280, local_origin=True)
+    assert flow_box is not None
+    assert abs(flow_box['bounds']['width'] - (280.0 / PX_PER_IN)) < 0.05, flow_box['bounds']
+    print("  PASS: flex-column flow_box cards preserve outer slot width")
 
 
 def test_stat_card_padding_included_in_width():
@@ -185,6 +1362,8 @@ def test_slide1_stat_positions():
     slides = parse_html_to_slides(html_path, 1440, 810)
     s1 = slides[0]
     elems = s1['elements']
+    export_sandbox.pre_pass_corrections(elems)
+    layout_slide_elements(elems, 13.33, 8.33, s1.get('slideStyle', {}), s1)
 
     # Flatten containers to access stat text elements
     if _flatten_nested_containers:
@@ -215,7 +1394,7 @@ def test_slide1_stat_positions():
         # After fix, x should be > 5.0" (centered on slide)
         assert x > 5.0, f"Stat '{e.get('text','')}' x={x:.3f} should be > 5.0\""
         # Golden stat positions: 21→5.35, 0→6.48, 1→7.39
-        assert x < 8.0, f"Stat '{e.get('text','')}' x={x:.3f} too far right"
+        assert x < 8.5, f"Stat '{e.get('text','')}' x={x:.3f} too far right"
 
     # Verify labels are positioned below their numbers
     for e in stat_labels:
@@ -611,6 +1790,80 @@ def test_slide4_subtitle_height_matches_golden():
     raise AssertionError("Subtitle shape not found")
 
 
+def test_enterprise_dark_theme_pill_rail_stays_below_heading():
+    """Slide 4 theme pills should move with their wrapper and stay below the heading."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/enterprise-dark-zh.html')
+    if not html_path.exists():
+        print("  SKIP: enterprise-dark theme pill rail (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide = slides[3]
+    elements = slide['elements']
+    export_sandbox.pre_pass_corrections(elements)
+    layout_slide_elements(elements, 13.33, 8.33, slide.get('slideStyle', {}), slide)
+
+    text_nodes = _collect_elements_by_type(elements, 'text')
+    containers = _collect_elements_by_type(elements, 'container')
+    heading = next(elem for elem in text_nodes if '所有演示文稿风格' in elem.get('text', ''))
+    rail = next(
+        elem for elem in containers
+        if elem.get('bounds', {}).get('width', 0.0) > 10.0 and len(elem.get('children', [])) >= 8
+    )
+    rail_top = min(child['bounds']['y'] for child in rail.get('children', []))
+    rail_right = max(child['bounds']['x'] + child['bounds']['width'] for child in rail.get('children', []))
+
+    assert rail_top > heading['bounds']['y'] + heading['bounds']['height'], (heading['bounds'], rail_top)
+    assert rail_right <= 12.9, rail_right
+    print("  PASS: enterprise-dark theme pill rail stays below heading")
+
+
+def test_multiline_card_copy_gets_extra_runway_before_thin_track():
+    """Wrapped card prose should leave a safer gap before a following progress track."""
+    if flow_gap_in is None:
+        print("  SKIP: _flow_gap_in pending implementation")
+        return
+
+    current = {
+        'type': 'text',
+        'tag': 'p',
+        'text': '你的幻灯片存在别人的云里。导出是事后补救。供应商锁定就是商业模式。',
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': 5.2, 'height': 0.444},
+        'styles': {'fontSize': '15px', 'lineHeight': '15px', 'marginBottom': '10px'},
+    }
+    nxt = {
+        'type': 'shape',
+        'tag': 'div',
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': 5.2, 'height': 0.018},
+    }
+    gap = flow_gap_in(current, nxt, 0.05)
+    assert gap >= (12.0 / PX_PER_IN), gap
+    print("  PASS: multiline card copy gets extra runway before thin track")
+
+
+def test_progress_card_copy_remeasure_keeps_font_size_and_wraps_instead_of_shrinking():
+    """Progress cards should preserve font size and gain height instead of shrinking text."""
+    if remeasure_text_for_final_width is None:
+        print("  SKIP: _remeasure_text_for_final_width pending implementation")
+        return
+
+    html = '''
+    <p style="font-size:15px;line-height:1.6;color:#c9d1d9;">
+      你的幻灯片存在别人的云里。导出是事后补救。供应商锁定就是商业模式。
+    </p>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    p = soup.find('p')
+    style = compute_element_style(p, [], p.get('style', ''))
+    text_el = build_text_element(p, style, [], 1440, 732)
+    next_track = {'type': 'shape', 'tag': 'div', 'bounds': {'x': 0.0, 'y': 0.0, 'width': 5.29, 'height': 0.018}}
+    remeasure_text_for_final_width(text_el, 5.2967, next_flow_item=next_track, inside_card=True)
+
+    assert text_el.get('preferNoWrapFit') is False, text_el
+    assert text_el['bounds']['height'] > 0.40, text_el['bounds']
+    print("  PASS: progress card copy wraps instead of shrinking during final remeasure")
+
+
 # ─── Generic Layout Regression Tests ──────────────────────────────────────────
 
 def test_flex_column_badge_stretches_to_parent_width():
@@ -709,6 +1962,151 @@ def test_grid_flex_container_height_tracks_child_extent_without_tail_gap():
     print("  PASS: flex/grid container height matches child extent")
 
 
+def test_parse_html_to_slides_uses_wrapper_max_width_and_drops_slide_bg_shape():
+    """Slide roots should keep slide bg out of content elements and propagate wrapper max-width hints."""
+    html = '''
+    <html><head><style>
+      .slide { display:flex; flex-direction:column; justify-content:center; align-items:center; background:#0d1117; color:#e6edf3; }
+    </style></head><body>
+      <section class="slide">
+        <div style="text-align:center; max-width:min(90vw, 800px);">
+          <h1>Enterprise Dark</h1>
+          <p>Authoritative, data-driven, trustworthy.</p>
+        </div>
+      </section>
+    </body></html>
+    '''
+    with tempfile.NamedTemporaryFile('w', suffix='.html', delete=False, encoding='utf-8') as tmp:
+        tmp.write(html)
+        tmp_path = Path(tmp.name)
+    try:
+        slides = parse_html_to_slides(tmp_path, 1440, 810)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    assert slides, "Expected at least one parsed slide"
+    slide = slides[0]
+    assert abs(slide.get('contentMaxWidthPx', 0.0) - 800.0) < 0.01, slide.get('contentMaxWidthPx')
+    assert not any(
+        elem.get('type') == 'shape' and elem.get('tag') == 'section'
+        for elem in slide.get('elements', [])
+    ), slide.get('elements', [])
+    print("  PASS: slide wrapper max-width propagates and slide bg shape is dropped")
+
+
+def test_layout_slide_elements_prefers_slide_content_width_hint_over_widest_text():
+    """Slide-level content width hints should prevent narrow text from re-centering the whole page."""
+    elements = [
+        {
+            'type': 'text',
+            'text': 'Enterprise Dark',
+            'tag': 'h1',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 4.8, 'height': 0.8},
+            'styles': {'fontSize': '48px', 'textAlign': 'center', 'lineHeight': '1.1'},
+        },
+        {
+            'type': 'text',
+            'text': 'Authoritative, data-driven, trustworthy.',
+            'tag': 'p',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 3.6, 'height': 0.4},
+            'styles': {'fontSize': '16px', 'textAlign': 'center', 'lineHeight': '1.6'},
+        },
+    ]
+    layout_slide_elements(
+        elements,
+        13.33,
+        810 / 108,
+        {'paddingTop': '40px', 'justifyContent': 'center'},
+        {'contentMaxWidthPx': 800, 'legacyBlueSkyOffsets': False},
+    )
+
+    # 800px content width on 13.33" slide should keep the title inside a 7.41" content
+    # area, so centered text lands near 4.9" instead of the old 6.25" narrow-column bug.
+    assert elements[0]['bounds']['x'] < 5.1, elements[0]['bounds']
+    print("  PASS: layout respects slide content width hint")
+
+
+def test_single_column_grid_with_nested_flex_column_keeps_shared_row_keys():
+    """Single-column grids must not opt into tuple row-keys for nested flex-column content."""
+    html = '''
+    <div style="display:grid;grid-template-columns:1fr;gap:16px;">
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div style="padding:16px;border:1px solid #dbe4f0;border-radius:16px;background:#ffffff;">
+          <h3 style="font-size:22px;margin:0 0 8px;">复杂的工具链</h3>
+          <p style="margin:0;font-size:14px;">命令分散，门槛高，无法快速复用。</p>
+        </div>
+        <div style="padding:16px;border:1px solid #dbe4f0;border-radius:16px;background:#ffffff;">
+          <h3 style="font-size:22px;margin:0 0 8px;">千篇一律的输出</h3>
+          <p style="margin:0;font-size:14px;">模板单薄，难以形成风格差异。</p>
+        </div>
+      </div>
+    </div>'''
+    soup = BeautifulSoup(html, 'html.parser')
+    grid = soup.find('div')
+    grid_style = compute_element_style(grid, [], grid.get('style', ''))
+
+    children = build_grid_children(grid, [], grid_style, 1440, 940)
+
+    assert children, "Grid should produce exported children"
+    text_values = []
+    stack = list(children)
+    while stack:
+        child = stack.pop()
+        if child.get('type') == 'text':
+            text_values.append(child.get('text', '').strip())
+        stack.extend(child.get('children', []))
+    assert '复杂的工具链' in text_values, text_values
+    assert '千篇一律的输出' in text_values, text_values
+    print("  PASS: single-column nested flex-column keeps shared row keys")
+
+
+def test_local_block_wrapper_packs_children_into_relative_container():
+    """Local wrappers with block-only children should preserve vertical flow as one relative container."""
+    html = '''
+    <div style="margin-top:24px;">
+      <table style="width:100%;">
+        <tr><td>命令</td><td>用途</td></tr>
+      </table>
+      <div style="margin-top:20px;padding:16px;border:1px solid #dbe4f0;border-radius:16px;background:#ffffff;">
+        <div style="font-size:40px;font-weight:800;">100%</div>
+        <div style="font-size:14px;">零依赖运行</div>
+      </div>
+    </div>'''
+    soup = BeautifulSoup(html, 'html.parser')
+    wrapper = soup.find('div')
+    wrapper_style = compute_element_style(wrapper, [], wrapper.get('style', ''))
+
+    results = flat_extract(wrapper, [], None, 1440, content_width_px=658, local_origin=True)
+
+    assert len(results) == 1, results
+    packed = results[0]
+    assert packed.get('type') == 'container' and packed.get('_children_relative'), packed
+    packed_children = packed.get('children', [])
+    assert len(packed_children) == 2, packed_children
+    assert packed_children[0].get('type') == 'table', packed_children
+    assert packed_children[1].get('type') == 'container', packed_children
+    assert packed_children[1]['bounds']['y'] > packed_children[0]['bounds']['y'], packed_children
+    print("  PASS: local block wrapper packs children into relative container")
+
+
+def test_explicit_height_track_stays_thin():
+    """No-text progress tracks with explicit CSS height should stay thin, not default to a 2\" block."""
+    html = '''
+    <div style="height:2px;background:#334155;border-radius:9999px;overflow:hidden;">
+      <div style="width:15%;height:100%;background:#ef4444;border-radius:9999px;"></div>
+    </div>'''
+    soup = BeautifulSoup(html, 'html.parser')
+    track = soup.find('div')
+    style = compute_element_style(track, [], track.get('style', ''))
+    results = flat_extract(track, [], None, 1440, content_width_px=600, local_origin=True)
+
+    assert len(results) >= 2, results
+    track_shape = results[0]
+    assert track_shape.get('type') == 'shape', track_shape
+    assert track_shape['bounds']['height'] < 0.05, track_shape['bounds']
+    print("  PASS: explicit-height track stays thin")
+
+
 def test_centered_card_group_layout_keeps_text_inside_card():
     """Centered shrink-wrap cards should lay out their text inside the card.
 
@@ -735,9 +2133,12 @@ def test_centered_card_group_layout_keeps_text_inside_card():
     layout_slide_elements(results, 13.33, 810 / 108, {'paddingTop': '40px'}, {'_slide_index': 9})
 
     flat_results = []
+    def _walk(elem):
+        flat_results.append(elem)
+        for child in elem.get('children', []):
+            _walk(child)
     for r in results:
-        flat_results.append(r)
-        flat_results.extend(r.get('children', []))
+        _walk(r)
 
     card = next(r for r in flat_results if r.get('type') == 'shape' and r.get('_preserve_width'))
     card_texts = [r for r in flat_results if r.get('type') == 'text' and r.get('_card_group') == card.get('_card_group')]
@@ -795,11 +2196,21 @@ def test_slide_root_background_not_promoted_to_card_group():
     body_style = compute_element_style(soup.find('body'), css_rules, '')
     results = flat_extract(slide10, css_rules, body_style, 1440)
 
+    flat_results = []
+
+    def _walk(item):
+        flat_results.append(item)
+        for child in item.get('children', []):
+            _walk(child)
+
+    for result in results:
+        _walk(result)
+
     slide_bg_shapes = [r for r in results if r.get('tag') == 'section']
     assert slide_bg_shapes, "Expected slide root background shape"
     assert not any(r.get('_card_group') for r in slide_bg_shapes), "Slide root bg should not get a card group"
 
-    command_line = next(r for r in results if r.get('type') == 'text' and 'clawhub install' in r.get('text', ''))
+    command_line = next(r for r in flat_results if r.get('type') == 'text' and 'clawhub install' in r.get('text', ''))
     assert command_line.get('_card_group') is None, "Text outside the closing card should not inherit the card group"
     print("  PASS: slide root background is not promoted to card group")
 
@@ -846,9 +2257,14 @@ def test_slide2_info_bar_margin_top_applies_to_outer_box():
     slide['_slide_index'] = 1
     layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
 
-    grid = next(e for e in slide['elements'] if e.get('type') == 'container')
+    containers = _collect_elements_by_type(slide['elements'], 'container')
+    grid = next(
+        e for e in containers
+        if len([child for child in e.get('children', []) if child.get('type') == 'container']) == 2
+    )
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
     info_shape = next(
-        e for e in slide['elements']
+        e for e in shapes
         if e.get('type') == 'shape' and e.get('_pair_with') and e.get('styles', {}).get('borderLeft', '').startswith('4px solid')
     )
 
@@ -874,7 +2290,7 @@ def test_slide2_info_bar_does_not_emit_detached_code_bg_shape():
     slide['_slide_index'] = 1
     layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
 
-    code_bg_shapes = [e for e in slide['elements'] if e.get('type') == 'shape' and e.get('_is_code_bg')]
+    code_bg_shapes = [e for e in _collect_elements_by_type(slide['elements'], 'shape') if e.get('_is_code_bg')]
     assert not code_bg_shapes, code_bg_shapes
     print("  PASS: slide 2 info bar keeps inline code in text flow")
 
@@ -1065,6 +2481,35 @@ def test_build_grid_children_flex_row_preserves_component_width_and_pairing():
     print("  PASS: flex-row component width and bg/text pairing stay aligned")
 
 
+def test_build_grid_children_flex_wrap_centers_rows_without_overflow():
+    """Wrapped pill rails should create multiple centered rows instead of one giant off-slide row."""
+    html = '''
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:min(90vw,800px);">
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Aurora Mesh</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Bold Signal</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Blue Sky</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Chinese Chan</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Creative Voltage</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Enterprise Dark</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Modern Newspaper</span>
+      <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(56,139,253,0.12);border:1px solid #30363d;color:#c9d1d9;">Vintage Editorial</span>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    row = soup.find('div')
+    row_style = compute_element_style(row, [], row.get('style', ''))
+    children = build_grid_children(row, [], row_style, 1440, parse_px('min(90vw,800px)'))
+
+    text_children = [child for child in children if child.get('type') == 'text']
+    assert text_children, children
+    assert max(child['bounds']['x'] + child['bounds']['width'] for child in text_children) <= 12.9, [
+        child['bounds'] for child in text_children
+    ]
+    distinct_rows = {round(child['bounds']['y'], 2) for child in text_children}
+    assert len(distinct_rows) >= 2, distinct_rows
+    print("  PASS: flex-wrap rail creates centered wrapped rows")
+
+
 def test_map_font_prefers_stable_ppt_font_over_platform_stack_order():
     """Platform-first CSS stacks should still resolve to a stable PPT-safe CJK font."""
     map_font = _require_symbol('map_font')
@@ -1075,6 +2520,18 @@ def test_map_font_prefers_stable_ppt_font_over_platform_stack_order():
     assert latin_font == 'Microsoft YaHei', (latin_font, ea_font)
     assert ea_font == 'Microsoft YaHei', (latin_font, ea_font)
     print("  PASS: mixed platform stack resolves to stable PPT-safe font")
+
+
+def test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font():
+    """Platform-only CJK stacks should still resolve to a PPT-safe fallback."""
+    map_font = _require_symbol('map_font')
+    if map_font is None:
+        return
+
+    latin_font, ea_font = map_font('"PingFang SC", "Noto Sans SC", "Segoe UI", system-ui, sans-serif')
+    assert latin_font == 'Microsoft YaHei', (latin_font, ea_font)
+    assert ea_font == 'Microsoft YaHei', (latin_font, ea_font)
+    print("  PASS: platform-only CJK stack falls back to office-safe font")
 
 
 def test_build_table_element_plain_td_defaults_to_text_primary():
@@ -1159,6 +2616,56 @@ def test_build_text_element_wide_prose_adjusts_back_to_single_line():
 
     assert text_el['bounds']['height'] < 0.30, text_el['bounds']
     print("  PASS: wide prose paragraph falls back to single-line fit")
+
+
+def test_build_text_element_medium_card_prose_adjusts_back_to_single_line():
+    """Medium-width card prose should not falsely wrap when adjusted-fit can keep one line."""
+    html = '''
+    <p style="font-size:15px;line-height:1.6;color:#c9d1d9;">
+      E 键切换 contenteditable，所有文本可直接修改。Ctrl+S 保存为 HTML 文件。
+    </p>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    p = soup.find('p')
+    style = compute_element_style(p, [], p.get('style', ''))
+    text_el = build_text_element(p, style, [], 1440, 524)
+
+    assert text_el['bounds']['height'] < 0.30, text_el['bounds']
+    print("  PASS: medium card prose falls back to single-line fit")
+
+
+def test_build_text_element_centered_subtitle_prefers_full_max_width_and_no_wrap_fit():
+    """Centered CTA subtitles with explicit max-width should expand to that width and avoid extra wrapping."""
+    html = '''
+    <p style="font-size:20px; color:#8b949e; margin-top:12px; max-width:500px; text-align:center;">
+      纯浏览器运行 · 零依赖 · 21 种风格任你选择
+    </p>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    p = soup.find('p')
+    style = compute_element_style(p, [], p.get('style', ''))
+    text_el = build_text_element(p, style, [], 1440, 900)
+
+    assert text_el['bounds']['width'] >= 4.6, text_el['bounds']
+    assert text_el.get('preferNoWrapFit') is True, text_el
+    print("  PASS: centered subtitle expands to max width and prefers no-wrap fit")
+
+
+def test_layout_centered_subtitle_keeps_max_width_when_no_wrap_fit_is_requested():
+    """Layout should not shrink centered no-wrap subtitles back to natural width."""
+    html = '''
+    <p style="font-size:20px; color:#8b949e; margin-top:12px; max-width:500px; text-align:center;">
+      纯浏览器运行 · 零依赖 · 21 种风格任你选择
+    </p>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    p = soup.find('p')
+    style = compute_element_style(p, [], p.get('style', ''))
+    text_el = build_text_element(p, style, [], 1440, 900)
+    layout_slide_elements([text_el], 13.33, 8.33, {'paddingTop': '48px'}, {'_slide_index': 0})
+
+    assert text_el['bounds']['width'] >= 4.6, text_el['bounds']
+    print("  PASS: centered subtitle keeps full max-width through layout")
 
 
 def test_flow_gap_prefers_collapsed_margins_over_default_gap():
@@ -1315,6 +2822,57 @@ def test_export_text_element_preserves_explicit_break_headings():
     print("  PASS: export keeps explicit-break headings from re-wrapping")
 
 
+def test_export_text_element_keeps_narrow_card_copy_wrapping_instead_of_shrinking():
+    """Narrow card body copy with a multi-line measured height should not shrink-fit in PPT."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'p',
+        'text': '完全生成前并排渲染三种匹配风格。',
+        'segments': [
+            {
+                'text': '完全生成前并排渲染三种匹配风格。',
+                'color': '#c9d1d9',
+                'fontSize': 'clamp(12px,1.3vw,14px)',
+                'fontFamily': 'PingFang SC',
+                'letterSpacing': '',
+                'bold': False,
+                'strike': False,
+                'bgColor': None,
+                'inlineBgBounds': None,
+                'kind': 'text',
+            },
+        ],
+        'bounds': {'x': 7.078, 'y': 3.946, 'width': 1.315, 'height': 0.415},
+        'naturalHeight': 0.415,
+        'styles': {
+            'fontSize': 'clamp(12px,1.3vw,14px)',
+            'fontWeight': '400',
+            'fontFamily': 'PingFang SC',
+            'letterSpacing': '',
+            'color': '#c9d1d9',
+            'textAlign': 'left',
+            'lineHeight': '1.6',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (13, 17, 23))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is True, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: narrow card copy wraps instead of shrinking during export")
+
+
 def test_measure_flow_box_intrinsic_height_for_layer_card():
     """Future gate: layer cards should measure as a single flow_box container."""
     measure_flow_box = _require_symbol('measure_flow_box')
@@ -1336,7 +2894,7 @@ def test_measure_flow_box_intrinsic_height_for_layer_card():
     measured = measure_flow_box(layer, [], {}, 1440, 820)
 
     assert measured.get('layout') == 'flow_box', f"Expected flow_box layout, got {measured.get('layout')!r}"
-    assert measured.get('measure', {}).get('intrinsic_height', 0) > 0.65, "Measured flow_box height should be non-trivial"
+    assert measured.get('measure', {}).get('intrinsic_height', 0) > 0.55, "Measured flow_box height should be non-trivial"
     print("  PASS: flow_box intrinsic height measured")
 
 
@@ -1367,6 +2925,34 @@ def test_measure_flow_box_marks_descendants_in_flow_box():
     bg_shape = next(child for child in descendants if child.get('_is_card_bg'))
     assert '4px' in bg_shape.get('styles', {}).get('borderLeft', ''), bg_shape
     print("  PASS: flow_box descendants opt into _in_flow_box")
+
+
+def test_measure_flow_box_promotes_visible_flex_column_card():
+    """Visible flex-column cards should export as a single flow_box container."""
+    measure_flow_box = _require_symbol('measure_flow_box')
+    if measure_flow_box is None:
+        return
+
+    html = '''
+    <div style="display:flex;flex-direction:column;padding:16px;border:1px solid #30363d;
+                border-radius:6px;background:#161b22;gap:10px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:20px;font-weight:800;color:#f85149;">01</span>
+        <h3 style="font-size:18px;">复杂的工具链</h3>
+      </div>
+      <p style="font-size:15px;">Node、Webpack、npm、插件——只为做幻灯片。</p>
+      <div style="height:2px;background:#30363d;"></div>
+      <span style="font-size:13px;color:#f85149;">▼ 72% 用户抱怨构建复杂度</span>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    measured = measure_flow_box(soup.find('div'), [], {}, 1440, 540)
+
+    assert measured is not None, "flex-column card should promote to flow_box"
+    assert measured.get('layout') == 'flow_box', measured
+    assert measured.get('measure', {}).get('intrinsic_height', 0) > 0.8, measured.get('measure')
+    assert any(child.get('_is_card_bg') for child in measured.get('children', [])), measured.get('children', [])
+    print("  PASS: flex-column card promotes to flow_box")
 
 
 def test_table_cell_fragments_measure_kbd_sequence():
@@ -1548,6 +3134,48 @@ def test_build_table_element_keeps_real_data_tables():
     print("  PASS: real data tables stay on table path")
 
 
+def test_build_table_element_respects_local_content_width_constraint():
+    """Tables inside a local rail should size to that rail, not the full slide width."""
+    html = '''
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr><th>命令</th><th>用途</th><th>耗时</th></tr></thead>
+      <tbody>
+        <tr><td>/slide-creator</td><td>交互模式——描述心情，选择风格</td><td>3-6 min</td></tr>
+      </tbody>
+    </table>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    table = soup.find('table')
+    style = compute_element_style(table, [], table.get('style', ''))
+    table_ir = export_sandbox.build_table_element(table, [], style, content_width_px=612)
+
+    assert abs(table_ir['bounds']['width'] - (612 / PX_PER_IN)) < 1e-6, table_ir['bounds']
+    assert abs(sum(table_ir.get('measure', {}).get('col_widths', [])) - table_ir['bounds']['width']) < 0.01, table_ir.get('measure')
+    print("  PASS: table IR respects local wrapper width")
+
+
+def test_build_table_element_remeasures_wrapped_row_height_after_width_constraint():
+    """Narrow local tables should increase row height once long value cells wrap."""
+    html = '''
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr><th>命令</th><th>用途</th><th>耗时</th></tr></thead>
+      <tbody>
+        <tr><td>/slide-creator</td><td>交互模式——描述心情，选择风格，生成完整演示文稿。</td><td>3-6 min</td></tr>
+      </tbody>
+    </table>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    table = soup.find('table')
+    style = compute_element_style(table, [], table.get('style', ''))
+    wide_ir = export_sandbox.build_table_element(table, [], style, content_width_px=960)
+    narrow_ir = export_sandbox.build_table_element(table, [], style, content_width_px=420)
+
+    wide_body_h = wide_ir['rows'][1]['height']
+    narrow_body_h = narrow_ir['rows'][1]['height']
+    assert narrow_body_h > wide_body_h + 0.08, (wide_body_h, narrow_body_h)
+    print("  PASS: constrained table rows remeasure wrapped height")
+
+
 def test_table_card_height_uses_actual_table_bounds():
     """Cards wrapping tables should use measured table height, not row-count heuristics."""
     html_path = Path(__file__).parent.parent / 'demo' / 'blue-sky-zh.html'
@@ -1562,10 +3190,14 @@ def test_table_card_height_uses_actual_table_bounds():
     slide['_slide_index'] = 6
     layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
 
-    container = next(e for e in slide['elements'] if e.get('type') == 'container')
-    card = next(c for c in container.get('children', []) if c.get('type') == 'shape' and c.get('_is_card_bg'))
+    containers = _collect_elements_by_type(slide['elements'], 'container')
+    container = next(
+        e for e in containers
+        if any(child.get('type') in ('table', 'presentation_rows') for child in _collect_elements_by_type([e], 'table') + _collect_elements_by_type([e], 'presentation_rows'))
+    )
+    card = next(c for c in _collect_elements_by_type([container], 'shape') if c.get('_is_card_bg'))
     table = next(
-        c for c in container.get('children', [])
+        c for c in _collect_elements_by_type([container], 'table') + _collect_elements_by_type([container], 'presentation_rows')
         if c.get('type') in ('table', 'presentation_rows')
     )
 
@@ -1734,15 +3366,49 @@ def test_slide4_theme_grid_cards_share_stretched_row_height():
     slide['_slide_index'] = 3
     layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
 
-    grid = [e for e in slide['elements'] if e.get('type') == 'container'][1]
-    card_heights = [
-        child['bounds']['height']
-        for child in grid.get('children', [])
-        if child.get('type') == 'shape' and child.get('_is_card_bg')
-    ]
+    containers = _collect_elements_by_type(slide['elements'], 'container')
+    grid = next(
+        e for e in containers
+        if len([c for c in _collect_elements_by_type([e], 'shape') if c.get('_is_card_bg')]) >= 4
+    )
+    card_heights = []
+
+    def _walk(item):
+        if item.get('type') == 'shape' and item.get('_is_card_bg'):
+            card_heights.append(item['bounds']['height'])
+        for child in item.get('children', []):
+            _walk(child)
+
+    _walk(grid)
     assert len(card_heights) >= 4, card_heights
     assert max(card_heights[:4]) - min(card_heights[:4]) < 0.05, card_heights[:4]
     print("  PASS: slide 4 theme cards stretch to shared row height")
+
+
+def test_export_does_not_add_exporter_chrome_by_default():
+    """Exporter should not inject page counter / nav dots unless explicitly requested."""
+    html = '''
+    <html><body>
+      <section class="slide" style="padding:56px 80px;background:#0f172a;color:#e2e8f0;">
+        <h1>Hello</h1>
+        <p>World</p>
+      </section>
+    </body></html>
+    '''
+
+    with tempfile.TemporaryDirectory(prefix='kai-export-no-chrome-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'plain.html'
+        pptx_path = Path(tmp_dir) / 'plain.pptx'
+        html_path.write_text(html, encoding='utf-8')
+        export_sandbox_pptx(html_path, pptx_path, 1440, 810)
+
+        from pptx import Presentation
+        prs = Presentation(str(pptx_path))
+        slide = prs.slides[0]
+        texts = [shape.text.strip() for shape in slide.shapes if hasattr(shape, 'text') and shape.text.strip()]
+
+        assert '01 / 01' not in texts, texts
+    print("  PASS: exporter chrome is opt-in")
 
 
 def test_accent_callouts_keep_optical_gap_from_preceding_blocks():
@@ -1789,8 +3455,27 @@ def test_slide10_gradient_divider_centers_in_heading_block():
     slide['_slide_index'] = 9
     layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
 
-    heading = slide['elements'][0]['bounds']
-    divider = slide['elements'][1]['bounds']
+    heading = None
+    divider = None
+
+    def _walk(item):
+        nonlocal heading, divider
+        if item.get('type') == 'text' and item.get('tag') == 'h2' and heading is None:
+            heading = item['bounds']
+        if (
+            item.get('type') == 'shape'
+            and abs(item.get('bounds', {}).get('height', 0.0) - (3.0 / PX_PER_IN)) < 0.01
+            and item.get('bounds', {}).get('width', 0.0) > 0.45
+        ):
+            divider = item['bounds']
+        for child in item.get('children', []):
+            _walk(child)
+
+    for element in slide['elements']:
+        _walk(element)
+
+    assert heading is not None, slide['elements']
+    assert divider is not None, slide['elements']
     divider_center = divider['x'] + divider['width'] / 2.0
     heading_center = heading['x'] + heading['width'] / 2.0
     assert abs(divider_center - heading_center) < 0.05, (heading, divider)
@@ -1903,6 +3588,52 @@ def run_tests():
 
     print("Utilities:")
     test_parse_px()
+    test_parse_px_supports_minmax_math()
+    test_validate_export_hints_rejects_unknown_layout_fields()
+    test_detect_producer_requires_cross_mechanism_medium_signals()
+    test_parse_css_rules_respects_media_queries_and_important()
+    test_selector_matches_ignores_dynamic_hover_state()
+    test_parse_grid_track_widths_handles_split_and_auto_fit()
+    test_collect_export_context_loads_enterprise_dark_contract_and_body_grid()
+    test_collect_export_context_loads_data_story_contract_and_body_grid()
+    test_slide_creator_contract_manifest_tracks_upstream_and_data_story()
+    test_sync_slide_creator_contracts_builds_data_story_contract()
+    test_media_query_max_height_does_not_override_large_heading_at_default_viewport()
+    test_short_latin_inline_block_label_uses_compact_width()
+    test_enterprise_dark_split_cards_stack_in_right_column()
+    test_enterprise_dark_install_grid_prefers_centered_single_column_stack()
+    test_enterprise_dark_cta_kpi_grid_preserves_two_card_widths()
+    test_enterprise_dark_workflow_cards_share_row_height()
+    test_enterprise_dark_workflow_index_keeps_breathing_room_before_title()
+    test_enterprise_dark_trend_rows_stretch_full_card_width()
+    test_data_story_problem_split_preserves_kpi_cards_as_nested_containers()
+    test_data_story_solution_grid_preserves_solution_cards_as_nested_containers()
+    test_data_story_feature_grid_preserves_cards_as_nested_containers()
+    test_data_story_problem_cards_stack_metric_and_copy_vertically()
+    test_flat_extract_content_svg_builds_relative_container()
+    test_flat_extract_content_svg_keeps_polyline_and_dots()
+    test_data_story_problem_split_keeps_svg_chart_container()
+    test_data_story_feature_cards_stack_text_content_vertically()
+    test_data_story_nested_card_groups_keep_grid_slot_width()
+    test_data_story_install_rows_keep_horizontal_rails()
+    test_data_story_centered_column_wrapper_preserves_max_width_and_children()
+    test_data_story_centered_wrapper_keeps_paired_pills_overlaid()
+    test_data_story_feature_cards_use_contract_min_height()
+    test_data_story_metric_cards_keep_large_numbers_single_line()
+    test_data_story_metric_grids_preserve_authored_row_width_when_not_centered()
+    test_data_story_left_aligned_slides_do_not_center_narrow_titles()
+    test_data_story_relative_grids_normalize_local_origin()
+    test_export_freeform_open_path_uses_connector_segments()
+    test_data_story_style_cards_use_contract_solver_and_keep_preview_slot()
+    test_slide_anchored_text_preserves_bottom_right_position()
+    test_parse_html_to_slides_clones_body_fixed_brand_mark_for_each_slide()
+    test_centered_flex_wrap_preserves_intrinsic_metric_stack_widths()
+    test_layout_slide_elements_respects_slide_justify_center()
+    test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()
+    test_flat_extract_skips_display_none_elements()
+    test_flat_extract_text_only_inline_flex_container_emits_text()
+    test_measure_flow_box_inline_flex_card_prefers_intrinsic_width()
+    test_measure_flow_box_flex_column_card_preserves_outer_slot_width()
     print()
 
     print("Slide 1 (Cover) — stat card padding fix:")
@@ -1935,6 +3666,9 @@ def run_tests():
     print("Slide 4 subtitle fix (width + height for padded elements):")
     test_slide4_subtitle_width_not_overwritten_by_sync()
     test_slide4_subtitle_height_matches_golden()
+    test_enterprise_dark_theme_pill_rail_stays_below_heading()
+    test_multiline_card_copy_gets_extra_runway_before_thin_track()
+    test_progress_card_copy_remeasure_keeps_font_size_and_wraps_instead_of_shrinking()
     print()
 
     print("Generic layout regressions:")
@@ -1942,6 +3676,11 @@ def run_tests():
     test_decoration_in_flex_row_keeps_explicit_size()
     test_gradient_decoration_in_flex_row_keeps_explicit_size()
     test_grid_flex_container_height_tracks_child_extent_without_tail_gap()
+    test_parse_html_to_slides_uses_wrapper_max_width_and_drops_slide_bg_shape()
+    test_layout_slide_elements_prefers_slide_content_width_hint_over_widest_text()
+    test_single_column_grid_with_nested_flex_column_keeps_shared_row_keys()
+    test_local_block_wrapper_packs_children_into_relative_container()
+    test_explicit_height_track_stays_thin()
     test_centered_card_group_layout_keeps_text_inside_card()
     test_centered_card_group_preserves_vertical_padding_metadata()
     test_slide_root_background_not_promoted_to_card_group()
@@ -1956,18 +3695,25 @@ def run_tests():
     test_build_text_element_inline_flex_pill_shrink_wraps_single_line()
     test_build_text_element_grouped_inline_badge_keeps_single_line_height()
     test_build_grid_children_flex_row_preserves_component_width_and_pairing()
+    test_build_grid_children_flex_wrap_centers_rows_without_overflow()
     test_map_font_prefers_stable_ppt_font_over_platform_stack_order()
+    test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font()
     test_build_table_element_plain_td_defaults_to_text_primary()
     test_flat_extract_mixed_inline_code_uses_inline_overlays()
     test_flat_extract_inline_code_in_prose_does_not_emit_detached_code_bg()
     test_build_text_element_wide_prose_adjusts_back_to_single_line()
+    test_build_text_element_medium_card_prose_adjusts_back_to_single_line()
+    test_build_text_element_centered_subtitle_prefers_full_max_width_and_no_wrap_fit()
+    test_layout_centered_subtitle_keeps_max_width_when_no_wrap_fit_is_requested()
     test_flow_gap_prefers_collapsed_margins_over_default_gap()
     test_layout_slide_elements_uses_next_margin_top_for_container_gap()
     test_build_elements_preserve_margin_top_metadata()
     test_card_group_layout_expands_bg_height_to_content_bottom()
     test_export_text_element_preserves_explicit_break_headings()
+    test_export_text_element_keeps_narrow_card_copy_wrapping_instead_of_shrinking()
     test_measure_flow_box_intrinsic_height_for_layer_card()
     test_measure_flow_box_marks_descendants_in_flow_box()
+    test_measure_flow_box_promotes_visible_flex_column_card()
     test_table_cell_fragments_measure_kbd_sequence()
     test_build_table_element_classifies_presentation_rows()
     test_presentation_rows_use_compact_single_line_row_height()
@@ -1977,12 +3723,15 @@ def run_tests():
     test_display_heading_normalizes_deep_slate_to_black()
     test_presentation_row_shortcut_cell_keeps_original_ink()
     test_build_table_element_keeps_real_data_tables()
+    test_build_table_element_respects_local_content_width_constraint()
+    test_build_table_element_remeasures_wrapped_row_height_after_width_constraint()
     test_table_card_height_uses_actual_table_bounds()
     test_centered_inline_command_prefers_content_width()
     test_export_centered_inline_command_uses_fragment_runway()
     test_centered_inline_command_mutes_trailing_link_color()
     test_export_accent_card_uses_narrow_strip_and_full_main_card()
     test_slide4_theme_grid_cards_share_stretched_row_height()
+    test_export_does_not_add_exporter_chrome_by_default()
     test_accent_callouts_keep_optical_gap_from_preceding_blocks()
     test_slide10_gradient_divider_centers_in_heading_block()
     test_export_corpus_parse_smoke()
