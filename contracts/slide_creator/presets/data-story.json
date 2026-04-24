@@ -6,9 +6,9 @@
   "contract_version": "1.0.0",
   "producer_version_range": ">=2.14.0 <3.0.0",
   "producer_version_tested": "2.14.0",
-  "contract_source_version": "slide-creator@f4c27c823e65",
-  "upstream_commit": "f4c27c823e659b3de4ea84dd95c1ea1f69797b14",
-  "generated_at": "2026-04-23",
+  "contract_source_version": "slide-creator@584abaae0af8",
+  "upstream_commit": "584abaae0af8b4d04aa06d1bb9447f6e3b12f8b5",
+  "generated_at": "2026-04-24",
   "source_refs": [
     "references/data-story.md",
     "references/html-template.md"
@@ -144,55 +144,55 @@
       "metric_single_line": true,
       "bottom_anchor_last_slot": true,
       "metric_vertical_align": "center_remaining",
-      "metric_max_height_ratio": 0.80
+      "metric_max_height_ratio": 0.8
     },
-  "style_card": {
-    "layout": "vertical_card",
-    "slots": [
-      "preview",
-      "title",
-      "body",
-      "trend"
-    ],
-    "minimum_height_in": 1.28,
-    "gaps": {
-      "after_metric": 0.1,
-      "after_label": 0.06
+    "style_card": {
+      "layout": "vertical_card",
+      "slots": [
+        "preview",
+        "title",
+        "body",
+        "trend"
+      ],
+      "minimum_height_in": 1.28,
+      "gaps": {
+        "after_metric": 0.1,
+        "after_label": 0.06
+      },
+      "stretch_first_slot": true,
+      "bottom_anchor_last_slot": false
     },
-    "stretch_first_slot": true,
-    "bottom_anchor_last_slot": false
-  },
-  "solution_card": {
-    "layout": "vertical_card",
-    "slots": [
-      "icon",
+    "solution_card": {
+      "layout": "vertical_card",
+      "slots": [
+        "icon",
         "title",
         "body"
       ],
-    "minimum_height_in": 1.02,
-    "gaps": {
-      "after_metric": 0.08,
-      "after_label": 0.06
+      "minimum_height_in": 1.02,
+      "gaps": {
+        "after_metric": 0.08,
+        "after_label": 0.06
+      },
+      "bottom_anchor_last_slot": false
     },
-    "bottom_anchor_last_slot": false
-  },
-  "feature_card": {
-    "layout": "vertical_card",
-    "slots": [
-      "metric",
+    "feature_card": {
+      "layout": "vertical_card",
+      "slots": [
+        "metric",
         "title",
         "body"
       ],
       "minimum_height_in": 1.06,
-    "gaps": {
-      "after_metric": 0.1,
-      "after_label": 0.06
+      "gaps": {
+        "after_metric": 0.1,
+        "after_label": 0.06
+      },
+      "metric_single_line": true,
+      "bottom_anchor_last_slot": false,
+      "metric_vertical_align": "center_remaining",
+      "metric_max_height_ratio": 0.58
     },
-    "metric_single_line": true,
-    "bottom_anchor_last_slot": false,
-    "metric_vertical_align": "center_remaining",
-    "metric_max_height_ratio": 0.58
-  },
     "install_row": {
       "layout": "split_rail",
       "slots": [
@@ -234,6 +234,8 @@
   "text_expectations": {
     "tabular_numbers": true
   },
+  "typography": {},
+  "line_break_contract": {},
   "producer_detection": {
     "body_attrs": {
       "data-preset": "Data Story",

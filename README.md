@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.3.0`
+Current release: `v1.4.0`
 
 ## 中文说明
 
@@ -20,21 +20,30 @@ Current release: `v1.3.0`
 
 ### 当前状态
 
-当前版本的验证基线是本地 `Blue Sky` 参考 deck：
+当前版本的两个主要验证锚点是：
 
-- 源 HTML：`demo/blue-sky-zh.html`
-- 本地 golden 参考：`demo/blue-sky-golden-native.pptx`
-- 最新验证分数：`9.1/10`
-- 结构化评估：
+- `Blue Sky`
+  - 源 HTML：`demo/blue-sky-zh.html`
+  - 本地 golden 参考：`demo/blue-sky-golden-native.pptx`
+  - 最新已验证分数：`9.1/10`
+- `Chinese Chan`
+  - 源 HTML：`demo/chinese-chan-zh.html`
+  - 最新完整视觉对比分数：`9.68/10`
+  - 当前结构化评估：
   - `overflow = 0`
   - `overlap = 0`
   - `card containment = 0`
-  - `element gaps = 2`
-  - `total actionable = 2`
+  - `element gaps = 0`
+  - `total actionable = 0`
 
-还没有达到“每页都 >= 9.5”的最终目标，但这条分支已经明显从“按页打补丁”转成了“增强 exporter 通用能力”。
+整体上，这条分支已经明显从“按页打补丁”转成了“增强 exporter 通用能力 + producer-aware preset contract”。仍未达到“所有风格都稳定每页 >= 9.5”的最终目标，但 `Chinese Chan` 这类高度依赖字体与换行节奏的 preset 已经被真正拉上来。
 
-最近新增了一条 `slide-creator` contract-driven 路径，正在把 `data-story / enterprise-dark` 这类新风格从“启发式近似”推进到“基于 preset contract 的组件导出”。当前最后一份完整跑完的 `data-story` 视觉对比结果是 `8.86/10`，说明这条路径已经有明显进展，但还处于持续优化阶段。
+最近新增并持续强化的，是一条 `slide-creator` contract-driven 路径，正在把 `data-story / enterprise-dark / chinese-chan` 这类新风格从“启发式近似”推进到“基于 preset contract 的组件与排版导出”。其中 `Chinese Chan` 已经补上：
+
+- typography contract
+- authored line-break contract
+- shared runtime chrome fallback
+- centered command / seal fidelity gate
 
 ### 主要能力
 
@@ -107,14 +116,24 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.3.0 更新重点
+### v1.4.0 更新重点
 
-- 新增 `slide-creator` contract sync pipeline，并把可消费的 preset contract vendored 到仓库内
-- 运行时支持更稳定的 producer detection / export hints / contract loading
-- `data-story` 路径开始落地 contract-driven 组件求解，覆盖 `metric_card`、centered wrapper、pill、small auto-fit KPI grid 等关键结构
-- CJK 主字体链改成稳定的 Office-safe 写法，中文 run 不再错误走 Latin 字体
-- 回归测试继续扩展到 `data-story / enterprise-dark / blue-sky / handwritten corpus`
-- GitHub 发布面继续保持收敛：本地 `docs/`、`memory/`、`demo/` 工作资产不作为仓库交付内容
+- 新增并同步 vendored `Chinese Chan` preset contract
+- render 前 text contract 已覆盖：
+  - mixed-script serif font mapping
+  - `preserveAuthoredBreaks`
+  - `preferWrapToPreserveSize`
+  - shrink-forbidden body prose
+- `slide-creator` 未 vendored preset 现在也会走 shared runtime chrome fallback，避免 `.progress-bar / .nav-dots` 误导出
+- `Chinese Chan` 的 `P8` 收口到通用 fidelity 规则：
+  - decoration shape 不再丢 border contract
+  - pure border shell 默认不再加 ambient shadow
+  - centered command card 按 authored content column 居中检查
+- roundtrip XML regression 继续扩展，直接校验：
+  - wrap / auto-size
+  - authored column width
+  - no page overflow
+  - seal border / centered command fidelity
 
 ### 已知边界
 
@@ -139,19 +158,23 @@ The current exporter is centered on:
 
 ### Current Status
 
-The current validated baseline is the local `Blue Sky` reference deck:
+The current validation anchors are:
 
-- Source HTML: `demo/blue-sky-zh.html`
-- Local golden reference: `demo/blue-sky-golden-native.pptx`
-- Latest verified score: `9.1/10`
-- Structured eval:
+- `Blue Sky`
+  - Source HTML: `demo/blue-sky-zh.html`
+  - Local golden reference: `demo/blue-sky-golden-native.pptx`
+  - Latest verified score: `9.1/10`
+- `Chinese Chan`
+  - Source HTML: `demo/chinese-chan-zh.html`
+  - Latest completed visual compare: `9.68/10`
+  - Current structured eval:
   - `overflow = 0`
   - `overlap = 0`
   - `card containment = 0`
-  - `element gaps = 2`
-  - `total actionable = 2`
+  - `element gaps = 0`
+  - `total actionable = 0`
 
-This branch has not yet reached the target of “every slide >= 9.5”, but it is now substantially more generalized than the earlier slide-by-slide patching phase.
+This branch has not yet reached the final goal of “every style, every slide >= 9.5”, but it is now substantially more generalized than the earlier slide-by-slide patching phase. The exporter now enforces preset-aware typography and break fidelity for serif/editorial decks such as `Chinese Chan`, not just generic geometry.
 
 ### Core Capabilities
 
@@ -224,14 +247,19 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.2.0 Highlights
+### v1.4.0 Highlights
 
-- README rewritten as a GitHub-facing bilingual document
-- Release surface cleaned up so local `docs/` and historical root output artifacts are no longer treated as repository content
-- `presentation_rows` now get stronger column-width handling even on the generic table renderer path
-- Shortcut-heavy first columns receive extra runway, reducing cramped navigation rows
-- Centered closing command rows now mute trailing link color to better match the reference deck
-- Auto-margin divider positioning has been normalized back to stable centering behavior
+- Added a vendored `Chinese Chan` preset contract under `contracts/slide_creator/`
+- Export runtime now enforces preset-aware text contracts for serif/editorial decks:
+  - mixed-script serif font mapping
+  - authored break preservation
+  - wrap-before-shrink behavior
+- Unknown `slide-creator` presets now still get shared runtime chrome filtering
+- `Chinese Chan` closing-slide fidelity improved through:
+  - preserved seal border contracts
+  - no-shadow border-shell rendering
+  - centered command-row roundtrip checks against the authored content column
+- XML roundtrip regression coverage expanded again for wrap fidelity, page-overflow guards, and preset-specific closing-slide structure
 
 ### Known Gaps
 

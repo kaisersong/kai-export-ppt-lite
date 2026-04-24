@@ -36,6 +36,109 @@ COMMON_CHROME_SELECTORS = [
 
 
 PRESET_SPECS: Dict[str, Dict[str, Any]] = {
+    "chinese-chan": {
+        "slug": "chinese-chan",
+        "preset": "Chinese Chan",
+        "family": "contemplative-editorial-serif",
+        "reference_refs": [
+            "references/chinese-chan.md",
+            "references/html-template.md",
+        ],
+        "demo_refs": [
+            "demos/chinese-chan-zh.html",
+            "demos/chinese-chan-en.html",
+        ],
+        "decorative_layers": [
+            {
+                "selector": "body::before",
+                "kind": "ink-wash",
+                "export_strategy": "background-layer",
+            }
+        ],
+        "component_selectors": {
+            "rule": [".zen-rule"],
+            "rule_line": [".zen-rule-line"],
+            "card": [".zen-card"],
+            "list": [".zen-list"],
+            "stat": [".zen-stat"],
+            "command": [".cmd"],
+            "ghost_kanji": [".zen-ghost-kanji"],
+            "seal": [".zen-seal"],
+        },
+        "component_slot_models": {
+            "card": {
+                "layout": "stack_card",
+                "slots": ["title", "body", "footer"],
+            },
+            "stat": {
+                "layout": "vertical_card",
+                "slots": ["metric", "label"],
+            },
+            "command": {
+                "layout": "inline_command_row",
+                "slots": ["command"],
+            },
+        },
+        "layout_variations": [
+            "editorial-cover",
+            "narrow-column-sermon",
+            "serif-stats",
+            "closing-command",
+        ],
+        "text_expectations": {"tabular_numbers": False},
+        "typography": {
+            "cn_font_stack": [
+                "Noto Serif CJK SC",
+                "Source Han Serif SC",
+                "STSong",
+                "SimSun",
+                "Georgia",
+                "serif",
+            ],
+            "en_font_stack": [
+                "EB Garamond",
+                "Crimson Text",
+                "Georgia",
+                "serif",
+            ],
+            "font_features": ["palt"],
+            "role_selectors": {
+                "title": [".zen-title", ".zen-h2", ".zen-subtitle", ".zen-caption", ".zen-accent", ".zen-ghost-kanji"],
+                "body": [".zen-body", ".zen-list"],
+                "command": [".cmd"],
+                "metric": [".num", ".label"],
+            },
+            "title": {
+                "family_mode": "cn_serif",
+                "weight": 400,
+                "line_height": 1.3,
+                "letter_spacing": "0.08em",
+            },
+            "body": {
+                "family_mode": "cn_serif",
+                "weight": 300,
+                "line_height": 1.9,
+                "letter_spacing": "0.05em",
+            },
+            "command": {
+                "family_mode": "en_serif",
+                "line_height": 1.6,
+            },
+            "metric": {
+                "family_mode": "en_serif",
+                "weight": 600,
+            },
+        },
+        "line_break_contract": {
+            "break_policy": {
+                ".zen-title": "prefer_preserve",
+                ".zen-body": "preserve",
+                ".cmd": "preserve",
+            },
+            "shrink_forbidden_for": [".zen-title", ".zen-body", ".cmd"],
+            "overflow_strategy": "expand_container_first",
+        },
+    },
     "blue-sky": {
         "slug": "blue-sky",
         "preset": "Blue Sky",
@@ -325,10 +428,11 @@ def _collect_observed_classes(soup: BeautifulSoup) -> List[str]:
     for node in soup.find_all(True):
         for class_name in node.get("class") or []:
             if (
-                class_name.startswith("ds-")
+                class_name.startswith("zen-")
+                or class_name.startswith("ds-")
                 or class_name.startswith("ent-")
                 or class_name.startswith("swiss-")
-                or class_name in {"feat-card", "install-row", "install-label", "install-cmd", "terminal-line"}
+                or class_name in {"feat-card", "install-row", "install-label", "install-cmd", "terminal-line", "cmd"}
                 or class_name.startswith("chart-")
             ):
                 classes.add(class_name)
@@ -411,6 +515,8 @@ def build_contract(
         "component_slot_models": spec["component_slot_models"],
         "layout_variations": spec["layout_variations"],
         "text_expectations": spec["text_expectations"],
+        "typography": spec.get("typography", {}),
+        "line_break_contract": spec.get("line_break_contract", {}),
         "producer_detection": {
             "body_attrs": {
                 "data-preset": spec["preset"],

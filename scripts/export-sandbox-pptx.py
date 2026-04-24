@@ -585,6 +585,15 @@ VIEWPORT_WIDTH_PX = 1440.0
 VIEWPORT_HEIGHT_PX = 900.0
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACTS_ROOT = REPO_ROOT / 'contracts'
+SLIDE_CREATOR_RUNTIME_CHROME_SELECTORS = [
+    '.progress-bar',
+    '.nav-dots',
+    '.edit-hotzone',
+    '.edit-toggle',
+    '#notes-panel',
+    '#present-btn',
+    '#present-counter',
+]
 EXPORT_HINTS_SCHEMA_PATH = CONTRACTS_ROOT / 'export_hints.schema.json'
 
 
@@ -971,6 +980,9 @@ class SlideCreatorAdapter:
             runtime_flags['export_progress_ui'] = body.get('data-export-progress') == 'true'
         if runtime_flags:
             hints['runtime_flags'] = runtime_flags
+
+        if not hints.get('chrome_selectors'):
+            hints['chrome_selectors'] = list(SLIDE_CREATOR_RUNTIME_CHROME_SELECTORS)
 
         contract = self.resolve_contract(hints)
         if contract:
@@ -2411,6 +2423,34 @@ def _selector_matches_element_class(element: Tag, selector: str) -> bool:
     return selector[1:] in _element_classes(element)
 
 
+def _selector_matches_contract_target(element: Tag, selector: str) -> bool:
+    selector = (selector or '').strip()
+    if not selector:
+        return False
+    if selector.startswith('.'):
+        return selector[1:] in _element_classes(element)
+    if selector.startswith('#'):
+        return (element.get('id') or '').strip() == selector[1:]
+    return element.name.lower() == selector.lower()
+
+
+def _css_font_stack_value(fonts: List[str]) -> str:
+    rendered: List[str] = []
+    generic_families = {'serif', 'sans-serif', 'monospace', 'system-ui'}
+    for raw in fonts or []:
+        token = (raw or '').strip()
+        if not token:
+            continue
+        bare = token.strip('\'"')
+        if bare.lower() in generic_families:
+            rendered.append(bare)
+        elif re.search(r'[\s-]', bare):
+            rendered.append(f'"{bare}"')
+        else:
+            rendered.append(bare)
+    return ', '.join(rendered)
+
+
 def _contract_component_name(element: Tag, contract: Optional[Dict[str, Any]]) -> Optional[str]:
     if not contract:
         return None
@@ -2426,6 +2466,83 @@ def _contract_slot_model(contract: Optional[Dict[str, Any]], component_name: Opt
     if not contract or not component_name:
         return {}
     return (contract.get('component_slot_models') or {}).get(component_name, {}) or {}
+
+
+def _resolve_text_contract(
+    element: Tag,
+    style: Dict[str, str],
+    raw_text: str,
+    contract: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    resolved: Dict[str, Any] = {
+        'role': None,
+        'breakPolicy': 'allow_reflow',
+        'preserveAuthoredBreaks': False,
+        'preferWrapToPreserveSize': False,
+        'shrinkForbidden': False,
+        'overflowStrategy': '',
+    }
+    if not contract:
+        return resolved
+
+    typography = contract.get('typography') or {}
+    role_selectors = typography.get('role_selectors') or {}
+    matched_role = None
+    for role_name, selectors in role_selectors.items():
+        if any(_selector_matches_contract_target(element, selector) for selector in selectors or []):
+            matched_role = role_name
+            break
+
+    if matched_role:
+        resolved['role'] = matched_role
+        role_cfg = (typography.get(matched_role) or {})
+        family_mode = role_cfg.get('family_mode', '').strip()
+        family_override = ''
+        if family_mode == 'cn_serif':
+            family_override = _css_font_stack_value(typography.get('cn_font_stack') or [])
+        elif family_mode == 'en_serif':
+            family_override = _css_font_stack_value(typography.get('en_font_stack') or [])
+        if family_override and not style.get('fontFamily'):
+            resolved['fontFamily'] = family_override
+        if role_cfg.get('weight') is not None and not style.get('fontWeight'):
+            resolved['fontWeight'] = str(role_cfg['weight'])
+        if role_cfg.get('line_height') is not None and not style.get('lineHeight'):
+            resolved['lineHeight'] = str(role_cfg['line_height'])
+        if role_cfg.get('letter_spacing') is not None and not style.get('letterSpacing'):
+            resolved['letterSpacing'] = str(role_cfg['letter_spacing'])
+
+    break_contract = contract.get('line_break_contract') or {}
+    break_policy = 'allow_reflow'
+    for selector, policy in (break_contract.get('break_policy') or {}).items():
+        if _selector_matches_contract_target(element, selector):
+            break_policy = (policy or 'allow_reflow').strip()
+            break
+    resolved['breakPolicy'] = break_policy
+    resolved['shrinkForbidden'] = any(
+        _selector_matches_contract_target(element, selector)
+        for selector in (break_contract.get('shrink_forbidden_for') or [])
+    )
+    resolved['overflowStrategy'] = (break_contract.get('overflow_strategy') or '').strip()
+
+    if '\n' in raw_text:
+        if break_policy in ('preserve', 'prefer_preserve'):
+            resolved['preserveAuthoredBreaks'] = True
+    elif break_policy == 'prefer_preserve' and resolved['shrinkForbidden']:
+        # Some authored heading systems intentionally omit <br> but rely on the
+        # browser's natural wrapping inside a constrained width. Prefer
+        # reflowing at the authored bounds over shrinking the type into one line.
+        resolved['preferWrapToPreserveSize'] = True
+    elif (
+        break_policy == 'preserve' and
+        resolved['shrinkForbidden'] and
+        matched_role == 'body'
+    ):
+        # Editorial body copy may omit explicit <br> but still depends on the
+        # authored column width for its reading rhythm. Preserve that width by
+        # preferring reflow over no-wrap shrink heuristics.
+        resolved['preferWrapToPreserveSize'] = True
+
+    return resolved
 
 
 def _looks_like_metric_token(text: str) -> bool:
@@ -3067,11 +3184,17 @@ def _build_contract_split_layout(
 
 def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSRule],
                        slide_width_px: float = 1440, content_width_px: float = None,
-                       exclude_elements: set = None) -> Optional[Dict]:
+                       exclude_elements: set = None,
+                       contract: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
     """Build a text element IR with segments."""
     tag = element.name.lower()
     raw_text = get_text_content(element).strip()
     style = dict(style)
+    text_contract = _resolve_text_contract(element, style, raw_text, contract)
+    for key in ('fontFamily', 'fontWeight', 'lineHeight', 'letterSpacing'):
+        override = text_contract.get(key)
+        if override:
+            style[key] = override
     applied_display_heading_boost = False
     if _should_apply_display_heading_boost(tag, style, raw_text):
         base_font_px = parse_px(style.get('fontSize', '16px')) or 16.0
@@ -3134,6 +3257,19 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
         )
     )
     monospace_text = _uses_monospace_font(style.get('fontFamily', ''))
+    centered_block_command_like = (
+        not component_like_inline and
+        has_visible_bg_or_border(style) and
+        '\n' not in text and
+        parse_px(style.get('width', '')) <= 0 and
+        parse_px(style.get('maxWidth', '')) <= 0 and
+        bool(content_width_px and content_width_px > 0) and
+        _has_centered_parent_column(element, css_rules, style) and
+        (
+            monospace_text or
+            'cmd' in _element_classes(element)
+        )
+    )
     include_box_padding = has_inline_boxes or has_grouped_inline or shrink_wrap_inline
 
     font_size_px = parse_px(style.get('fontSize', '16px'))
@@ -3258,12 +3394,32 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     default_w_in = 13.33 - 1.0  # default bounds width
     # Use maxWidth from style or fallback to content_width_px (inherited parent constraint)
     effective_max_w = max_w if max_w > 0 else (content_width_px if content_width_px and content_width_px > 0 else 0)
+    preserve_authored_column_width = (
+        width_in is None and
+        bool(text_contract.get('preferWrapToPreserveSize')) and
+        effective_max_w > 0 and
+        not component_like_inline
+    )
+    if preserve_authored_column_width:
+        # Contract-driven serif/editorial presets sometimes rely on the authored
+        # column width itself as the line-breaking rhythm. If we shrink the text
+        # box to natural content width here, later render-time wrapping cannot
+        # recreate the source cadence (e.g. Chinese Chan title/body blocks).
+        width_in = effective_max_w / PX_PER_IN
     # Cap default width by explicit maxWidth constraint
     if effective_max_w > 0:
         default_w_in = min(default_w_in, effective_max_w / PX_PER_IN)
     if width_in is None:
         # For inline/inline-block elements, use content width; for block, use full width
-        if is_inline_block or content_w_in < default_w_in * 0.5:
+        if centered_block_command_like:
+            pad_l = parse_px(style.get('paddingLeft', ''))
+            pad_r = parse_px(style.get('paddingRight', ''))
+            border_w = _sum_border_width_px(style, horizontal=True)
+            width_in = min(
+                (content_w_px + pad_l + pad_r + border_w + 8.0) / PX_PER_IN,
+                default_w_in,
+            )
+        elif is_inline_block or content_w_in < default_w_in * 0.5:
             if is_inline_block:
                 # Inline-block: include CSS horizontal padding in width (pills, badges)
                 pad_l = parse_px(style.get('paddingLeft', ''))
@@ -3365,9 +3521,17 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     text_ir = {
         'type': 'text', 'tag': element.name, 'text': text, 'segments': segments,
         'fragments': fragments,
+        'sourceTextRaw': raw_text,
+        'hasAuthoredBreaks': '\n' in raw_text,
+        'preserveAuthoredBreaks': bool(text_contract.get('preserveAuthoredBreaks')),
+        'preferWrapToPreserveSize': bool(text_contract.get('preferWrapToPreserveSize')),
+        'shrinkForbidden': bool(text_contract.get('shrinkForbidden')),
+        'breakPolicy': text_contract.get('breakPolicy', 'allow_reflow'),
+        'overflowStrategy': text_contract.get('overflowStrategy', ''),
+        '_text_contract_role': text_contract.get('role'),
         'gradientColors': gradient_colors[:2] if gradient_colors else None, 'textTransform': style.get('textTransform', 'none'),
         'inlineContentWidth': content_w_in,
-        'preferContentWidth': has_inline_boxes or has_direct_link_child or has_grouped_inline or shrink_wrap_inline,
+        'preferContentWidth': has_inline_boxes or has_direct_link_child or has_grouped_inline or shrink_wrap_inline or centered_block_command_like,
         'preferCenteredBlockWidth': has_centered_grouped_command,
         'preferNoWrapFit': prefer_no_wrap_fit,
         'renderInlineBoxOverlays': has_inline_code_or_kbd and has_direct_link_child and '\n' not in text,
@@ -3385,7 +3549,7 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             'fontFamily': style.get('fontFamily', ''),
             'letterSpacing': style.get('letterSpacing', ''),
             'color': _style_text_color(style, style.get('color', '')),
-            'textAlign': style.get('textAlign', 'left'),
+            'textAlign': 'center' if centered_block_command_like else style.get('textAlign', 'left'),
             'lineHeight': style.get('lineHeight', 'normal'),
             'listStyleType': style.get('listStyleType', ''),
             'paddingLeft': style.get('paddingLeft', '0px'),
@@ -4839,7 +5003,8 @@ def flat_extract(
                         })
 
         text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px,
-                                      exclude_elements=pill_elements if pill_elements else None)
+                                      exclude_elements=pill_elements if pill_elements else None,
+                                      contract=contract)
 
         parent_display = ''
         parent_flex_dir = ''
@@ -5014,7 +5179,7 @@ def flat_extract(
         # trends, badges, or tiny status rows while keeping the actual text as a
         # bare text node. In those cases, export the element as text directly.
         if total_text and not direct_tag_children:
-            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
+            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px, contract=contract)
             if text_el:
                 results = []
                 if _should_create_bg_shape(style, has_gradient_bg):
@@ -5139,7 +5304,7 @@ def flat_extract(
             all_inline = all(c.name.lower() in INLINE_TAGS or c.name.lower() in ('br',) for c in child_tags)
             if all_inline or not child_tags:
                 # Don't pass content_width_px for inline-block — size to content
-                text_el = build_text_element(element, style, css_rules, slide_width_px)
+                text_el = build_text_element(element, style, css_rules, slide_width_px, contract=contract)
                 if text_el:
                     results = []
                     if has_visible_bg_or_border(style):
@@ -5163,7 +5328,7 @@ def flat_extract(
 
         # Leaf text container: entire content is text (with inline formatting)
         if is_leaf_text_container(element, css_rules):
-            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
+            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px, contract=contract)
             if text_el:
                 results = []
                 # Only create background shape if this element actually has a visible
@@ -5200,6 +5365,11 @@ def flat_extract(
                     'styles': {
                         'backgroundColor': style.get('backgroundColor', ''),
                         'backgroundImage': style.get('backgroundImage', ''),
+                        'border': style.get('border', ''),
+                        'borderLeft': style.get('borderLeft', ''),
+                        'borderRight': style.get('borderRight', ''),
+                        'borderTop': style.get('borderTop', ''),
+                        'borderBottom': style.get('borderBottom', ''),
                         'borderRadius': style.get('borderRadius', ''),
                         'marginTop': style.get('marginTop', ''),
                         'marginBottom': style.get('marginBottom', ''),
@@ -5226,7 +5396,7 @@ def flat_extract(
         # This handles cases like .info divs with <strong> and <code> children.
         all_inline = bool(child_tags) and all(c.name.lower() in INLINE_TAGS for c in child_tags)
         if all_inline and total_text and has_visible_bg_or_border(style):
-            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px)
+            text_el = build_text_element(element, style, css_rules, slide_width_px, content_width_px, contract=contract)
             if text_el:
                 # For inline-child containers, use text element's width (respects content_width_px)
                 _expand_padding(style)
@@ -8062,6 +8232,16 @@ _FONT_MAP = {
     'DM Sans':       ('Inter', 'Hiragino Sans GB'),
     'Clash Display': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Satoshi':       ('Helvetica Neue', 'Hiragino Sans GB'),
+    'EB Garamond':   ('Baskerville', 'Songti SC'),
+    'Noto Serif SC': ('Songti SC', 'Songti SC'),
+    'Noto Serif CJK SC': ('Songti SC', 'Songti SC'),
+    'Source Han Serif': ('Songti SC', 'Songti SC'),
+    'Songti SC':     ('Songti SC', 'Songti SC'),
+    'STSong':        ('Songti SC', 'Songti SC'),
+    'Georgia':       ('Georgia', 'Songti SC'),
+    'Baskerville':   ('Baskerville', 'Songti SC'),
+    'Times New Roman': ('Times New Roman', 'Songti SC'),
+    'serif':         ('Baskerville', 'Songti SC'),
     'Microsoft YaHei': ('Helvetica Neue', 'Hiragino Sans GB'),
     '微软雅黑':          ('Helvetica Neue', 'Hiragino Sans GB'),
     'PingFang SC':      ('Helvetica Neue', 'Hiragino Sans GB'),
@@ -8075,6 +8255,11 @@ _FONT_MAP = {
 _DEFAULT_FONTS = ('Helvetica Neue', 'Hiragino Sans GB')
 _DEFAULT_LATIN_FONTS = ('Inter', 'Inter')
 _OFFICE_SAFE_FONT_KEYS = (
+    'Noto Serif SC',
+    'Noto Serif CJK SC',
+    'Source Han Serif',
+    'Songti SC',
+    'STSong',
     'PingFang SC',
     'Noto Sans SC',
     'Noto Sans CJK SC',
@@ -8082,11 +8267,32 @@ _OFFICE_SAFE_FONT_KEYS = (
     'Microsoft YaHei',
     '微软雅黑',
 )
+_SERIF_CJK_FONT_KEYS = (
+    'Noto Serif SC',
+    'Noto Serif CJK SC',
+    'Source Han Serif',
+    'Songti SC',
+    'STSong',
+)
+_SERIF_LATIN_FONT_KEYS = (
+    'eb garamond',
+    'crimson text',
+    'baskerville',
+    'georgia',
+    'times new roman',
+    'serif',
+)
 _LATIN_SAFE_FONT_KEYS = {
     'inter': ('Inter', 'Inter'),
     'dm sans': ('Inter', 'Inter'),
     'clash display': ('Helvetica Neue', 'Helvetica Neue'),
     'satoshi': ('Helvetica Neue', 'Helvetica Neue'),
+    'eb garamond': ('Baskerville', 'Baskerville'),
+    'baskerville': ('Baskerville', 'Baskerville'),
+    'georgia': ('Georgia', 'Georgia'),
+    'times new roman': ('Times New Roman', 'Times New Roman'),
+    'crimson text': ('Baskerville', 'Baskerville'),
+    'serif': ('Baskerville', 'Baskerville'),
     'arial': ('Arial', 'Arial'),
     'helvetica': ('Helvetica Neue', 'Helvetica Neue'),
     'helvetica neue': ('Helvetica Neue', 'Helvetica Neue'),
@@ -8103,6 +8309,33 @@ _LATIN_SAFE_FONT_KEYS = {
 }
 
 
+def _stack_prefers_serif(candidates: List[str]) -> bool:
+    for candidate in candidates:
+        candidate_lc = candidate.lower()
+        if candidate_lc in _SERIF_LATIN_FONT_KEYS:
+            return True
+        if any(candidate_lc == key.lower() for key in _SERIF_CJK_FONT_KEYS):
+            return True
+    return False
+
+
+def _resolve_serif_mixed_script_fonts(candidates: List[str]) -> Tuple[str, str]:
+    latin_choice = None
+    ea_choice = None
+    for candidate in candidates:
+        candidate_lc = candidate.lower()
+        if latin_choice is None and candidate_lc in _LATIN_SAFE_FONT_KEYS and candidate_lc in _SERIF_LATIN_FONT_KEYS:
+            latin_choice = _LATIN_SAFE_FONT_KEYS[candidate_lc][0]
+        if ea_choice is None:
+            for css_name in _SERIF_CJK_FONT_KEYS:
+                if candidate_lc == css_name.lower():
+                    ea_choice = _FONT_MAP[css_name][1]
+                    break
+    latin_choice = latin_choice or 'Baskerville'
+    ea_choice = ea_choice or 'Songti SC'
+    return (latin_choice, ea_choice)
+
+
 def map_font(css_font_family: str, text: str = ''):
     contains_cjk = bool(text) and has_cjk(text)
     if css_font_family:
@@ -8112,6 +8345,7 @@ def map_font(css_font_family: str, text: str = ''):
             if normalized:
                 candidates.append(normalized)
         latin_only = bool(text) and not contains_cjk
+        mixed_script = bool(text) and contains_cjk and has_latin_word(text)
         if latin_only:
             for candidate in candidates:
                 candidate_lc = candidate.lower()
@@ -8122,6 +8356,8 @@ def map_font(css_font_family: str, text: str = ''):
                 for css_name, fonts in _LATIN_SAFE_FONT_KEYS.items():
                     if css_name in candidate_lc:
                         return fonts
+        if mixed_script and _stack_prefers_serif(candidates):
+            return _resolve_serif_mixed_script_fonts(candidates)
         # Prefer stable Office-safe CJK fonts when a CSS stack mixes platform
         # fonts (e.g. PingFang / system-ui) with a later PPT-friendly fallback.
         for preferred in _OFFICE_SAFE_FONT_KEYS:
@@ -8231,6 +8467,19 @@ def set_light_shadow(shape):
         eff_ref = style_elem.find(f'{{{NA}}}effectRef')
         if eff_ref is not None:
             eff_ref.set('idx', '0')
+
+
+def set_explicit_line(shape, rgb: Tuple[int, int, int], width_pt: float) -> None:
+    """Force an explicit solid line in XML for subtle bordered shapes."""
+    try:
+        shape.line.fill.solid()
+    except Exception:
+        pass
+    try:
+        shape.line.color.rgb = RGBColor(*rgb)
+        shape.line.width = Pt(max(width_pt, 0.5))
+    except Exception:
+        pass
 
 
 def segments_to_lines(segments):
@@ -8558,6 +8807,12 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
     blend_bg = slide_bg
     bg_rgb = parse_color(s.get('backgroundColor', ''), bg=blend_bg)
     grad_fill = gradient_to_solid(s.get('backgroundImage', ''), slide_bg=slide_bg)
+    is_stamp_seal = (
+        all_uniform and
+        bg_rgb is not None and
+        b.get('width', 0.0) <= 0.35 and
+        b.get('height', 0.0) <= 0.35
+    )
     render_border_only = (
         not bg_rgb and
         not grad_fill and
@@ -8631,8 +8886,7 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
         if is_white_or_near_white and bd['width'] <= 1.5:
             suppress_line(shape)
         else:
-            shape.line.color.rgb = RGBColor(*bd['rgb'])
-            shape.line.width = Pt(max(0.5, bd['width'] * 0.75))
+            set_explicit_line(shape, bd['rgb'], max(0.5, bd['width'] * 0.75))
     elif len(borders) >= 1:
         suppress_line(shape)
         # Helper: skip border shape if near-white (golden doesn't have white borders)
@@ -8674,7 +8928,7 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
     else:
         suppress_line(shape)
 
-    if not elem.get('_is_decoration'):
+    if not elem.get('_is_decoration') and not is_stamp_seal and (bg_rgb or grad_fill):
         set_light_shadow(shape)
     tf = shape.text_frame
 
@@ -8834,6 +9088,8 @@ def export_text_element(slide, elem, bg_color=None):
         '\n' in (elem.get('text', '') or '') and
         font_size_pt >= 28
     )
+    preserve_authored_breaks = bool(elem.get('preserveAuthoredBreaks'))
+    prefer_wrap_to_preserve_size = bool(elem.get('preferWrapToPreserveSize'))
     display_heading_like = (
         elem.get('tag') in ('h1', 'h2', 'h3') and
         font_size_pt >= 20 and
@@ -8861,6 +9117,18 @@ def export_text_element(slide, elem, bg_color=None):
         # allowing PowerPoint to wrap again on the last word/character.
         tf.word_wrap = False
         tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    elif prefer_wrap_to_preserve_size:
+        # Contract-preferred display titles may not include explicit <br>, but
+        # they still rely on the browser's natural wrapping inside a capped
+        # width. Preserve authored width rhythm by growing the textbox instead
+        # of crushing the type onto one line.
+        tf.word_wrap = True
+        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    elif preserve_authored_breaks:
+        # Contract-authored rhythm text should keep only the explicit source
+        # breaks. Let the textbox grow instead of shrinking or reflowing.
+        tf.word_wrap = False
+        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
     elif display_heading_like or display_metric_like:
         # Display headings / KPI tokens should preserve authored font size and
         # let the textbox grow instead of shrinking the typography.

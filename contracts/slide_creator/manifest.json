@@ -1,9 +1,9 @@
 {
   "producer": "slide-creator",
   "manifest_version": "1.0.0",
-  "generated_at": "2026-04-23",
+  "generated_at": "2026-04-24",
   "upstream_repo": "slide-creator",
-  "upstream_commit": "f4c27c823e659b3de4ea84dd95c1ea1f69797b14",
+  "upstream_commit": "584abaae0af8b4d04aa06d1bb9447f6e3b12f8b5",
   "runtime_chrome_selectors": [
     ".progress-bar",
     ".nav-dots",
@@ -14,6 +14,23 @@
     "#present-counter"
   ],
   "presets": [
+    {
+      "slug": "chinese-chan",
+      "preset": "Chinese Chan",
+      "contract_id": "slide-creator/chinese-chan",
+      "contract_version": "1.0.0",
+      "family": "contemplative-editorial-serif",
+      "producer_version_tested": "unknown",
+      "contract_path": "presets/chinese-chan.json",
+      "source_refs": [
+        "references/chinese-chan.md",
+        "references/html-template.md"
+      ],
+      "demo_refs": [
+        "demos/chinese-chan-zh.html",
+        "demos/chinese-chan-en.html"
+      ]
+    },
     {
       "slug": "blue-sky",
       "preset": "Blue Sky",

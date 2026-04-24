@@ -1,5 +1,67 @@
 # Release Notes
 
+## v1.4.0 - 2026-04-24
+
+This release pushes the exporter beyond generic geometry fixes and into preset-aware text fidelity. The main shipped work is the `Chinese Chan` path: vendored preset contract, serif typography enforcement, authored line-break preservation, shared runtime chrome fallback, and closing-slide fidelity checks.
+
+本次版本把优化重点从“通用几何近似”继续推进到“preset-aware 排版 fidelity”。核心交付是 `Chinese Chan` 这条路径：vendored preset contract、serif 字体契约、显式换行保真、shared runtime chrome fallback，以及结尾页的结构 fidelity 检查。
+
+### Highlights
+
+- Version bump to `v1.4.0`
+- Added vendored `Chinese Chan` contract:
+  - `contracts/slide_creator/presets/chinese-chan.json`
+- Expanded runtime preset enforcement:
+  - mixed-script serif font mapping
+  - `preserveAuthoredBreaks`
+  - `preferWrapToPreserveSize`
+  - wrap-before-shrink behavior for constrained prose
+- Shared `slide-creator` runtime chrome fallback now covers presets without a vendored contract
+- Closing-slide fidelity checks now include:
+  - seal border preservation
+  - no-shadow border-shell rendering
+  - centered command-row alignment relative to the authored content column
+- Regression coverage expanded with roundtrip XML checks for:
+  - wrap/auto-size fidelity
+  - authored column-width preservation
+  - no page overflow
+  - seal border and centered command fidelity
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/chinese-chan-zh.html demo/chinese-chan-output.pptx
+python3 scripts/rigorous-eval.py --sandbox demo/chinese-chan-output.pptx --golden demo/chinese-chan-output.pptx --skip-visual
+```
+
+Result:
+
+- `All tests passed!`
+- `Chinese Chan` structured eval:
+  - `overflow = 0`
+  - `overlap = 0`
+  - `element gaps = 0`
+  - `card containment = 0`
+  - `total actionable = 0`
+
+Current completed visual compare snapshot:
+
+- `Chinese Chan`: `9.68/10`
+
+### Known Gaps
+
+This release materially improves preset-aware export quality, but the exporter still does not fully meet the broader goal of every supported style scoring `>= 9.5` on every slide.
+
+Current concentration areas remain outside the shipped `Chinese Chan` path:
+
+- `data-story` component geometry and optical rhythm
+- `enterprise-dark` split/feature-card layout depth
+- local visual-compare tooling still relies on a non-ideal office-render path on this machine
+
+
 ## v1.3.0 - 2026-04-24
 
 This release turns the earlier `slide-creator` contract discussion into shipped repository infrastructure: sync script, vendored preset contracts, runtime contract loading, and the first contract-driven geometry tuning path for newer presets such as `data-story`.

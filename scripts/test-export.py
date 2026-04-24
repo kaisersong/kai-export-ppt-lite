@@ -11,6 +11,7 @@ Usage:
 import sys
 import os
 import json
+import re
 import importlib.util
 import tempfile
 from zipfile import ZipFile
@@ -327,6 +328,27 @@ def test_collect_export_context_loads_data_story_contract_and_body_grid():
     print("  PASS: data-story contract and body pseudo grid load")
 
 
+def test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback():
+    """Chinese Chan should load its synced contract and still inherit shared runtime chrome filtering."""
+    html_path = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
+    if not html_path.exists():
+        print("  SKIP: chinese-chan contract context (HTML not found)")
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding='utf-8'), 'lxml')
+    context = collect_export_context(html_path, soup)
+    assert context['detection']['producer'] == 'slide-creator', context['detection']
+    assert context['contract'] is not None, context
+    assert context['contract']['contract_id'] == 'slide-creator/chinese-chan', context['contract']
+    assert context['contract']['typography']['cn_font_stack'][0] == 'Noto Serif CJK SC', context['contract']
+    assert context['contract']['line_break_contract']['break_policy']['.zen-body'] == 'preserve', context['contract']
+    chrome = context['hints'].get('chrome_selectors') or []
+    assert '.progress-bar' in chrome, chrome
+    assert '.nav-dots' in chrome, chrome
+    assert '#present-btn' in chrome, chrome
+    print("  PASS: Chinese Chan loads synced contract and shared runtime chrome fallback")
+
+
 def test_slide_creator_contract_manifest_tracks_upstream_and_data_story():
     """The synced manifest should record upstream versioning and include Data Story."""
     manifest_path = REPO_ROOT / 'contracts' / 'slide_creator' / 'manifest.json'
@@ -335,7 +357,7 @@ def test_slide_creator_contract_manifest_tracks_upstream_and_data_story():
     assert manifest['producer'] == 'slide-creator', manifest
     assert manifest['upstream_commit'], manifest
     slugs = {preset['slug'] for preset in manifest['presets']}
-    assert {'blue-sky', 'enterprise-dark', 'swiss-modern', 'data-story'} <= slugs, manifest
+    assert {'blue-sky', 'enterprise-dark', 'swiss-modern', 'data-story', 'chinese-chan'} <= slugs, manifest
     data_story = next(preset for preset in manifest['presets'] if preset['slug'] == 'data-story')
     assert data_story['producer_version_tested'] == '2.14.0', data_story
     print("  PASS: slide-creator manifest tracks upstream commit and data-story")
@@ -2782,6 +2804,99 @@ def test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack():
     print("  PASS: pure Latin labels prefer installed Latin font in mixed stack")
 
 
+def _chinese_chan_contract_fixture():
+    return {
+        'contract_id': 'slide-creator/chinese-chan',
+        'typography': {
+            'cn_font_stack': ['Noto Serif CJK SC', 'Source Han Serif SC', 'STSong', 'Georgia', 'serif'],
+            'en_font_stack': ['EB Garamond', 'Crimson Text', 'Georgia', 'serif'],
+            'role_selectors': {
+                'title': ['.zen-title', '.zen-h2', '.zen-subtitle', '.zen-caption', '.zen-accent', '.zen-ghost-kanji'],
+                'body': ['.zen-body', '.zen-list'],
+                'command': ['.cmd'],
+                'metric': ['.num', '.label'],
+            },
+            'title': {'family_mode': 'cn_serif', 'weight': 400, 'line_height': 1.3, 'letter_spacing': '0.08em'},
+            'body': {'family_mode': 'cn_serif', 'weight': 300, 'line_height': 1.9, 'letter_spacing': '0.05em'},
+            'command': {'family_mode': 'en_serif', 'line_height': 1.6},
+            'metric': {'family_mode': 'en_serif', 'weight': 600},
+        },
+        'line_break_contract': {
+            'break_policy': {
+                '.zen-title': 'prefer_preserve',
+                '.zen-body': 'preserve',
+                '.cmd': 'preserve',
+            },
+            'shrink_forbidden_for': ['.zen-title', '.zen-body', '.cmd'],
+            'overflow_strategy': 'expand_container_first',
+        },
+    }
+
+
+def test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script():
+    """Mixed-script serif stacks should keep Latin serif for Latin glyphs and CJK serif for East Asian glyphs."""
+    css_stack = '"Noto Serif SC", "EB Garamond", Georgia, serif'
+    assert map_font(css_stack, text='零依赖 HTML 演示文稿') == ('Baskerville', 'Songti SC')
+    print("  PASS: mixed-script serif stack keeps Latin+CJK serif pair")
+
+
+def test_resolve_text_contract_chinese_chan_preserves_body_breaks():
+    """Chinese Chan body blocks with authored <br> should preserve source rhythm and forbid shrink-fit."""
+    resolver = _require_symbol('_resolve_text_contract')
+    if resolver is None:
+        return
+
+    soup = BeautifulSoup('<div class="zen-body">Bold Signal —— 笃定<br>Blue Sky —— 澄明</div>', 'html.parser')
+    node = soup.find('div')
+    contract = _chinese_chan_contract_fixture()
+    resolved = resolver(node, {'fontFamily': ''}, 'Bold Signal —— 笃定\nBlue Sky —— 澄明', contract)
+
+    assert resolved['role'] == 'body', resolved
+    assert resolved['preserveAuthoredBreaks'] is True, resolved
+    assert resolved['shrinkForbidden'] is True, resolved
+    assert 'Noto Serif CJK SC' in resolved.get('fontFamily', ''), resolved
+    print("  PASS: Chinese Chan body text contract preserves authored breaks")
+
+
+def test_resolve_text_contract_chinese_chan_title_prefers_wrap_over_shrink():
+    """Chinese Chan display titles should preserve authored width rhythm by wrapping before shrinking."""
+    resolver = _require_symbol('_resolve_text_contract')
+    if resolver is None:
+        return
+
+    soup = BeautifulSoup('<div class="zen-title">kai-slide-creator</div>', 'html.parser')
+    node = soup.find('div')
+    contract = _chinese_chan_contract_fixture()
+    resolved = resolver(node, {'fontFamily': '"Noto Serif SC", "EB Garamond", Georgia, serif'}, 'kai-slide-creator', contract)
+
+    assert resolved['role'] == 'title', resolved
+    assert resolved['breakPolicy'] == 'prefer_preserve', resolved
+    assert resolved['preferWrapToPreserveSize'] is True, resolved
+    assert resolved['shrinkForbidden'] is True, resolved
+    print("  PASS: Chinese Chan title prefers wrap over shrink")
+
+
+def test_resolve_text_contract_chinese_chan_body_prefers_wrap_for_long_prose():
+    """Chinese Chan body prose without explicit <br> should still prefer reflow over no-wrap shrink heuristics."""
+    resolver = _require_symbol('_resolve_text_contract')
+    if resolver is None:
+        return
+
+    soup = BeautifulSoup(
+        '<div class="zen-body">演示工具越来越臃肿。模板商店卖着换汤不换药的「新设计」。AI 生成器做出来的幻灯片——精致、通用、过目即忘。</div>',
+        'html.parser',
+    )
+    node = soup.find('div')
+    contract = _chinese_chan_contract_fixture()
+    resolved = resolver(node, {'fontFamily': '"Noto Serif SC", "EB Garamond", Georgia, serif'}, node.get_text(), contract)
+
+    assert resolved['role'] == 'body', resolved
+    assert resolved['breakPolicy'] == 'preserve', resolved
+    assert resolved['preferWrapToPreserveSize'] is True, resolved
+    assert resolved['shrinkForbidden'] is True, resolved
+    print("  PASS: Chinese Chan long body prose prefers wrap over no-wrap heuristics")
+
+
 def test_build_table_element_plain_td_defaults_to_text_primary():
     """Plain td cells without explicit color should still export as readable dark text."""
     html = '''
@@ -3119,6 +3234,248 @@ def test_export_text_element_keeps_narrow_card_copy_wrapping_instead_of_shrinkin
     assert tf.word_wrap is True, tf.word_wrap
     assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
     print("  PASS: narrow card copy wraps instead of shrinking during export")
+
+
+def test_export_text_element_preserves_contract_authored_breaks_without_shrinking():
+    """Contract-preserved authored breaks should grow the text box instead of shrinking or reflowing."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'div',
+        'text': 'Bold Signal —— 笃定\nBlue Sky —— 澄明',
+        'segments': [
+            {'text': 'Bold Signal —— 笃定', 'color': '#1a1a18', 'fontSize': '16px', 'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif', 'letterSpacing': '0.05em', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+            {'text': '\n', 'color': '#1a1a18', 'fontSize': '16px', 'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif', 'letterSpacing': '0.05em', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+            {'text': 'Blue Sky —— 澄明', 'color': '#1a1a18', 'fontSize': '16px', 'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif', 'letterSpacing': '0.05em', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+        ],
+        'bounds': {'x': 4.0, 'y': 2.0, 'width': 3.8, 'height': 0.55},
+        'naturalHeight': 0.55,
+        'preserveAuthoredBreaks': True,
+        'shrinkForbidden': True,
+        'styles': {
+            'fontSize': '16px',
+            'fontWeight': '300',
+            'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif',
+            'letterSpacing': '0.05em',
+            'color': '#1a1a18',
+            'textAlign': 'left',
+            'lineHeight': '1.9',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (250, 250, 248))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is False, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: contract-preserved authored breaks grow instead of shrinking")
+
+
+def test_export_text_element_prefers_wrap_to_preserve_size_for_body_prose():
+    """Contract-preferred body prose should wrap and grow before falling back to no-wrap shrink heuristics."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'div',
+        'text': '演示工具越来越臃肿。模板商店卖着换汤不换药的「新设计」。AI 生成器做出来的幻灯片——精致、通用、过目即忘。',
+        'segments': [
+            {'text': '演示工具越来越臃肿。模板商店卖着换汤不换药的「新设计」。AI 生成器做出来的幻灯片——精致、通用、过目即忘。', 'color': '#1a1a18', 'fontSize': '16px', 'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif', 'letterSpacing': '0.05em', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+        ],
+        'bounds': {'x': 4.0, 'y': 2.0, 'width': 5.56, 'height': 0.55},
+        'naturalHeight': 0.55,
+        'preferWrapToPreserveSize': True,
+        'shrinkForbidden': True,
+        'styles': {
+            'fontSize': '16px',
+            'fontWeight': '300',
+            'fontFamily': '"Noto Serif CJK SC", "EB Garamond", Georgia, serif',
+            'letterSpacing': '0.05em',
+            'color': '#1a1a18',
+            'textAlign': 'left',
+            'lineHeight': '1.9',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (250, 250, 248))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is True, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: contract-preferred body prose wraps before shrinking")
+
+
+def test_build_text_element_centered_block_command_shrinkwraps():
+    """Centered column command cards should shrink-wrap to content width and export centered."""
+    html = """<!doctype html><html><head><style>
+    .slide-content { max-width: 600px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+    .cmd { padding: 10px 16px; border: 1px solid rgba(26,26,24,0.15); border-radius: 2px;
+           font-family: "EB Garamond", monospace; font-size: 14px; line-height: 1.6; text-align:left; }
+    </style></head><body>
+      <div class="slide-content">
+        <div class="cmd">/slide-creator "你的主题" --style "Chinese Chan"</div>
+      </div>
+    </body></html>"""
+    soup = BeautifulSoup(html, 'html.parser')
+    css_rules = extract_css_from_soup(soup)
+    content = soup.select_one('.slide-content')
+    parent_style = compute_element_style(content, css_rules, content.get('style', ''))
+    node = soup.select_one('.cmd')
+    style = compute_element_style(node, css_rules, node.get('style', ''), parent_style)
+    elem = build_text_element(node, style, css_rules, 1440, 600.0)
+    assert elem is not None
+    assert elem['preferContentWidth'] is True, elem
+    assert elem['styles']['textAlign'] == 'center', elem['styles']
+    assert elem['bounds']['width'] < 4.8, elem['bounds']
+    print("  PASS: centered block command cards shrink-wrap and center")
+
+
+def test_export_shape_background_small_stamp_seal_keeps_border_without_shadow():
+    """Small bordered seal shapes should keep their border and skip ambient card shadows."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    elem = {
+        'type': 'shape',
+        'tag': 'div',
+        'bounds': {'x': 6.0, 'y': 2.0, 'width': 0.222, 'height': 0.222},
+        'styles': {
+            'backgroundColor': 'rgba(196,30,58,0.08)',
+            'backgroundImage': '',
+            'border': '1px solid #C41E3A',
+            'borderLeft': '1px solid #C41E3A',
+            'borderRight': '1px solid #C41E3A',
+            'borderTop': '1px solid #C41E3A',
+            'borderBottom': '1px solid #C41E3A',
+            'borderRadius': '2px',
+            'marginTop': '',
+            'marginBottom': '',
+            'marginLeft': '',
+            'marginRight': '',
+        },
+    }
+    export_sandbox.export_shape_background(slide, elem, (250, 250, 248))
+    with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        prs.save(tmp_path)
+        with ZipFile(tmp_path) as zf:
+            xml = zf.read('ppt/slides/slide1.xml').decode('utf-8')
+        assert 'C41E3A' in xml, xml
+        assert 'outerShdw' not in xml, xml
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    print("  PASS: small seal keeps border and skips shadow")
+
+
+def _find_textbox_xml(xml: str, text_snippet: str):
+    shape_pattern = re.compile(r'<p:sp>(.*?)</p:sp>', re.S)
+    target_block = None
+    for block in shape_pattern.findall(xml):
+        if text_snippet in block:
+            target_block = block
+            break
+    assert target_block, text_snippet
+
+    geom_match = re.search(
+        r'<a:off x="(?P<x>\d+)" y="(?P<y>\d+)"/><a:ext cx="(?P<cx>\d+)" cy="(?P<cy>\d+)"/>',
+        target_block,
+    )
+    body_match = re.search(
+        r'<a:bodyPr wrap="(?P<wrap>[^"]+)".*?>(?P<bodypr>.*?)</a:bodyPr>',
+        target_block,
+        re.S,
+    )
+    assert geom_match and body_match, target_block
+    return {
+        'x': int(geom_match.group('x')),
+        'y': int(geom_match.group('y')),
+        'cx': int(geom_match.group('cx')),
+        'cy': int(geom_match.group('cy')),
+        'wrap': body_match.group('wrap'),
+        'bodypr': body_match.group('bodypr'),
+        'block': target_block,
+    }
+
+
+def test_chinese_chan_roundtrip_wrap_fidelity_and_no_page_overflow():
+    """Chinese Chan text-contract pages should keep authored column width, wrap mode, and stay inside the slide."""
+    src = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
+    if not src.exists():
+        return
+
+    with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp:
+        out_path = Path(tmp.name)
+
+    try:
+        export_sandbox_pptx(str(src), str(out_path))
+        slide_w = int(914400 * 13.33)
+
+        with ZipFile(out_path) as zf:
+            slide2_xml = zf.read('ppt/slides/slide2.xml').decode('utf-8')
+            slide3_xml = zf.read('ppt/slides/slide3.xml').decode('utf-8')
+            slide8_xml = zf.read('ppt/slides/slide8.xml').decode('utf-8')
+
+        slide2_para_1 = _find_textbox_xml(slide2_xml, '演示工具越来越臃肿。模板商店卖着换汤不换药的「新设计」。AI 生成器做出来的幻灯片——精致、通用、过目即忘。')
+        slide2_para_2 = _find_textbox_xml(slide2_xml, '我们从一个更简单的前提开始：')
+        slide3_para = _find_textbox_xml(slide3_xml, '每种预设都是一套')
+        slide8_title = _find_textbox_xml(slide8_xml, '从一个预设开始')
+        slide8_cmd = _find_textbox_xml(slide8_xml, '/slide-creator "你的主题" --style "Chinese Chan"')
+
+        for box in (slide2_para_1, slide2_para_2, slide3_para, slide8_title):
+            assert box['wrap'] == 'square', box
+            assert 'spAutoFit' in box['bodypr'], box['bodypr']
+            assert box['x'] + box['cx'] <= slide_w + 1000, (box, slide_w)
+
+        # Preserve the authored 600px reading column instead of shrinking to the
+        # text's intrinsic width. This prevents late wrong wraps and page spill.
+        min_authored_column_emu = int(5.45 * 914400)
+        assert slide2_para_1['cx'] >= min_authored_column_emu, slide2_para_1
+        assert slide2_para_2['cx'] >= min_authored_column_emu, slide2_para_2
+        assert slide3_para['cx'] >= min_authored_column_emu, slide3_para
+        assert slide8_title['cx'] >= min_authored_column_emu, slide8_title
+
+        # Closing command card should shrink-wrap and stay centered rather than
+        # stretching to the full authored column and reading as left-aligned.
+        assert slide8_cmd['cx'] < min_authored_column_emu, slide8_cmd
+        cmd_center = slide8_cmd['x'] + slide8_cmd['cx'] / 2
+        title_center = slide8_title['x'] + slide8_title['cx'] / 2
+        assert abs(cmd_center - title_center) <= 120000, (slide8_cmd, slide8_title)
+        assert 'algn="ctr"' in slide8_cmd['block'], slide8_cmd['block']
+
+        # The small zen seal should keep its border and avoid shadow/no-fill fallback.
+        seal_match = re.search(
+            r'<a:off x="(?P<x>\d+)" y="(?P<y>\d+)"/><a:ext cx="203200" cy="203200"/>.*?'
+            r'<a:solidFill><a:srgbClr val="(?P<fill>[0-9A-F]{6})"/></a:solidFill>.*?'
+            r'<a:ln[^>]*>.*?<a:solidFill><a:srgbClr val="(?P<line>[0-9A-F]{6})"/></a:solidFill>',
+            slide8_xml,
+            re.S,
+        )
+        assert seal_match, slide8_xml
+        assert seal_match.group('fill') == 'F5E8E8', seal_match.groupdict()
+        assert seal_match.group('line') == 'C41E3A', seal_match.groupdict()
+    finally:
+        out_path.unlink(missing_ok=True)
+
+    print("  PASS: Chinese Chan keeps wrap width, centered command alignment, and seal border fidelity")
 
 
 def test_measure_flow_box_intrinsic_height_for_layer_card():
@@ -3844,6 +4201,7 @@ def run_tests():
     test_parse_grid_track_widths_handles_split_and_auto_fit()
     test_collect_export_context_loads_enterprise_dark_contract_and_body_grid()
     test_collect_export_context_loads_data_story_contract_and_body_grid()
+    test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback()
     test_slide_creator_contract_manifest_tracks_upstream_and_data_story()
     test_sync_slide_creator_contracts_builds_data_story_contract()
     test_media_query_max_height_does_not_override_large_heading_at_default_viewport()
@@ -3954,6 +4312,10 @@ def run_tests():
     test_map_font_prefers_stable_ppt_font_over_platform_stack_order()
     test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font()
     test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack()
+    test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script()
+    test_resolve_text_contract_chinese_chan_preserves_body_breaks()
+    test_resolve_text_contract_chinese_chan_title_prefers_wrap_over_shrink()
+    test_resolve_text_contract_chinese_chan_body_prefers_wrap_for_long_prose()
     test_build_table_element_plain_td_defaults_to_text_primary()
     test_flat_extract_mixed_inline_code_uses_inline_overlays()
     test_flat_extract_inline_code_in_prose_does_not_emit_detached_code_bg()
@@ -3967,6 +4329,11 @@ def run_tests():
     test_card_group_layout_expands_bg_height_to_content_bottom()
     test_export_text_element_preserves_explicit_break_headings()
     test_export_text_element_keeps_narrow_card_copy_wrapping_instead_of_shrinking()
+    test_export_text_element_preserves_contract_authored_breaks_without_shrinking()
+    test_export_text_element_prefers_wrap_to_preserve_size_for_body_prose()
+    test_build_text_element_centered_block_command_shrinkwraps()
+    test_export_shape_background_small_stamp_seal_keeps_border_without_shadow()
+    test_chinese_chan_roundtrip_wrap_fidelity_and_no_page_overflow()
     test_measure_flow_box_intrinsic_height_for_layer_card()
     test_measure_flow_box_marks_descendants_in_flow_box()
     test_measure_flow_box_promotes_visible_flex_column_card()
