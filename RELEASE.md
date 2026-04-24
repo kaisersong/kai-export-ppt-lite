@@ -1,5 +1,75 @@
 # Release Notes
 
+## v1.5.0 - 2026-04-25
+
+This release moves `Swiss Modern` from “recognized preset metadata” to a real contract-driven export path. The shipped work includes synced Swiss contracts, runtime role-aware layout builders, and text reflow fixes that close real regressions on the `kingdee` sample deck.
+
+本次版本把 `Swiss Modern` 从“能识别 preset metadata”推进到“真正走 contract-driven 导出路径”。核心交付包括：同步后的 Swiss contract、运行时 role-aware layout builder，以及修掉 `kingdee` 样本里真实出现的文字回流问题。
+
+### Highlights
+
+- Version bump to `v1.5.0`
+- Expanded vendored `Swiss Modern` contract:
+  - `support_tiers`
+  - `layout_contracts`
+  - `signature_elements`
+  - typography and line-break contract
+- Export runtime now consumes Swiss component semantics for:
+  - `title_grid`
+  - `column_content`
+  - `stat_block`
+  - `pull_quote`
+- Text fidelity tightened again:
+  - wide measured prose no longer falls back into accidental no-wrap fit
+  - single-line contract titles keep `no-wrap` when authored width already fits
+  - P3 / P5 wrap behavior is verified from roundtrip PPTX XML, not just visual preview
+- Regression coverage expanded for:
+  - Swiss contract sync
+  - compatible wrapper unwrap
+  - wide multiline prose wrap
+  - single-line title no-wrap guard
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py
+python3 -B -m pytest scripts/test-export.py -q -k "long_editorial_prose_skips_no_wrap_fit or single_line_contract_title_stays_no_wrap or wide_multiline_prose_wraps_from_measured_height or swiss or prefer_wrap_to_preserve_size_for_body_prose or centered_subtitle_prefers_full_max_width_and_no_wrap_fit or wide_prose_adjusts_back_to_single_line or medium_card_prose_adjusts_back_to_single_line"
+python3 scripts/export-sandbox-pptx.py "/Users/song/Downloads/kingdee_stock_presentation (1).html" /tmp/kingdee_from_original_v7.pptx
+python3 scripts/export-sandbox-pptx.py /Users/song/Downloads/kingdee_stock_presentation_swiss_canonical.html /tmp/kingdee_swiss_canonical_v7.pptx
+python3 scripts/compare-html-ppt-visual.py "/Users/song/Downloads/kingdee_stock_presentation (1).html" /tmp/kingdee_from_original_v7.pptx --outdir /tmp/kingdee_exporter_only_compare_v7
+python3 scripts/compare-html-ppt-visual.py /Users/song/Downloads/kingdee_stock_presentation_swiss_canonical.html /tmp/kingdee_swiss_canonical_v7.pptx --outdir /tmp/kingdee_canonical_compare_v7
+```
+
+Result:
+
+- Targeted regression suite: `16 passed`
+- Original `kingdee` compare:
+  - overall `9.36/10`
+  - Slide 03 `9.3/10`
+  - Slide 05 `9.5/10`
+- Canonical Swiss compare:
+  - overall `9.18/10`
+  - Slide 03 `9.2/10`
+  - Slide 05 `9.4/10`
+- File-level XML checks:
+  - original `P3 body wrap = square`
+  - original `P5 title wrap = none`
+  - canonical `P5 title wrap = none`
+
+### Known Gaps
+
+This release materially improves `Swiss Modern`, but it still does not meet the broader goal of every supported style scoring `>= 9.5` on every slide.
+
+Current concentration areas remain:
+
+- canonical Swiss optical rhythm on `title_grid / column_content`
+- remaining title scale and page-center drift on selected layouts
+- local office-render compare tooling is still not the ideal final visual oracle
+- arbitrary third-party Swiss-like HTML is still outside the guaranteed fidelity path
+
+
 ## v1.4.0 - 2026-04-24
 
 This release pushes the exporter beyond generic geometry fixes and into preset-aware text fidelity. The main shipped work is the `Chinese Chan` path: vendored preset contract, serif typography enforcement, authored line-break preservation, shared runtime chrome fallback, and closing-slide fidelity checks.

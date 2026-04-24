@@ -328,6 +328,26 @@ def test_collect_export_context_loads_data_story_contract_and_body_grid():
     print("  PASS: data-story contract and body pseudo grid load")
 
 
+def test_collect_export_context_loads_swiss_modern_contract_with_layout_tiers():
+    """Swiss Modern should load its expanded synced contract instead of the old minimal metadata shell."""
+    html_path = Path('/Users/song/projects/slide-creator/demos/swiss-modern-zh.html')
+    if not html_path.exists():
+        print("  SKIP: swiss-modern contract context (HTML not found)")
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding='utf-8'), 'lxml')
+    context = collect_export_context(html_path, soup)
+    assert context['detection']['producer'] == 'slide-creator', context['detection']
+    assert context['contract'] is not None, context
+    contract = context['contract']
+    assert contract['contract_id'] == 'slide-creator/swiss-modern', contract
+    assert contract['typography']['display_font_stack'][0] == 'Archivo Black', contract
+    assert contract['line_break_contract']['break_policy']['.swiss-title'] == 'prefer_preserve', contract
+    assert 'title_grid' in contract['layout_contracts'], contract
+    assert 'compatible' in contract['support_tiers'], contract
+    print("  PASS: Swiss Modern loads expanded layout-tier contract")
+
+
 def test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback():
     """Chinese Chan should load its synced contract and still inherit shared runtime chrome filtering."""
     html_path = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
@@ -392,6 +412,438 @@ def test_sync_slide_creator_contracts_builds_data_story_contract():
     assert contract['component_slot_models']['feature_card']['bottom_anchor_last_slot'] is False, contract
     assert '.ds-kpi-card' in contract['component_selectors']['metric_card'], contract
     print("  PASS: sync helper builds data-story contract")
+
+
+def test_sync_slide_creator_contracts_builds_swiss_modern_contract():
+    """Swiss Modern sync should materialize executable layout tiers, typography, and compatibility metadata."""
+    root = Path('/Users/song/projects/slide-creator')
+    if not root.exists():
+        print("  SKIP: sync swiss-modern contract (repo not found)")
+        return
+
+    manifest = sync_slide_creator_contracts.build_manifest(
+        root,
+        generated_at='2026-04-24',
+        upstream_commit='deadbeef',
+    )
+    swiss_manifest = next(preset for preset in manifest['presets'] if preset['slug'] == 'swiss-modern')
+    assert {'canonical', 'compatible', 'fallback'} <= set(swiss_manifest['support_tiers']), swiss_manifest
+
+    contract = sync_slide_creator_contracts.build_contract(
+        root,
+        sync_slide_creator_contracts.PRESET_SPECS['swiss-modern'],
+        generated_at='2026-04-24',
+        upstream_commit='deadbeef',
+    )
+    assert contract['contract_id'] == 'slide-creator/swiss-modern', contract
+    assert contract['component_slot_models']['body_columns']['layout'] == 'typographic_columns', contract
+    assert contract['layout_contracts']['column_content']['compatible']['unwrap_wrapper'] is True, contract
+    assert contract['signature_elements']['bg_num']['selectors'] == ['.bg-num'], contract
+    assert contract['style_constraints']['allow_shadows'] is False, contract
+    print("  PASS: sync helper builds Swiss Modern contract with layout tiers")
+
+
+def test_parse_html_to_slides_swiss_compatible_wrapper_unwraps_and_preserves_two_columns():
+    """Swiss compatible decks with a `.slide-content` wrapper should unwrap into the slide root and keep the right rail split."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="kai-slide-creator v2.18.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; display:flex; flex-direction:row; align-items:center; position:relative; background:#fff; }
+          .slide-content { flex:1; display:flex; flex-direction:column; padding:48px; }
+          .content { position:relative; z-index:1; }
+          .left-col { flex:0 0 40%; padding-right:24px; }
+          .right-col { flex:1; column-count:2; column-gap:32px; }
+          .swiss-title { font-family:"Archivo Black", sans-serif; font-size:48px; line-height:1.0; text-transform:uppercase; }
+          .swiss-body { font-family:"Nunito", sans-serif; font-size:16px; line-height:1.55; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-2">
+          <div class="slide-content content">
+            <div class="left-col">
+              <h2 class="swiss-title">Column Story</h2>
+            </div>
+            <div class="right-col">
+              <p class="swiss-body">Paragraph Alpha keeps the first rail occupied with enough words to wrap naturally.</p>
+              <p class="swiss-body">Paragraph Beta continues the typographic flow without turning into one giant textbox.</p>
+              <p class="swiss-body">Paragraph Gamma should begin in the second column once the first rail is sufficiently filled.</p>
+            </div>
+          </div>
+          <span class="slide-num-label">02 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-compatible-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-compatible.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'compatible', slide
+    assert slide['exportRole'] == 'column_content', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    custom_root = next(
+        (elem for elem in slide['elements'] if elem.get('_component_contract') == 'swiss_column_content'),
+        None,
+    )
+    assert custom_root is not None, slide['elements']
+
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    label = next(elem for elem in texts if elem.get('text') == '02 / 05')
+    assert label.get('_skip_layout') is True, label
+
+    title = next(elem for elem in texts if elem.get('text') == 'Column Story')
+    paragraphs = [elem for elem in texts if elem.get('text', '').startswith('Paragraph')]
+    assert len(paragraphs) == 3, texts
+    distinct_x = {round(elem['bounds']['x'], 2) for elem in paragraphs}
+    assert len(distinct_x) >= 2, [elem['bounds'] for elem in paragraphs]
+    assert title['bounds']['x'] < min(elem['bounds']['x'] for elem in paragraphs), (
+        title['bounds'],
+        [elem['bounds'] for elem in paragraphs],
+    )
+    print("  PASS: Swiss compatible wrapper unwrap keeps page label and split body rails")
+
+
+def test_parse_html_to_slides_swiss_canonical_title_grid_bottom_anchors_hero_block():
+    """Canonical Swiss title grids should anchor the hero block near the bottom-left instead of centering it generically."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.21.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; display:flex; justify-content:flex-end; position:relative; overflow:hidden; background:#fff; }
+          .bg-num { position:absolute; right:24px; top:0; font-family:"Archivo Black", sans-serif; font-size:220px; color:#f0f0f0; line-height:0.85; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+          .hero-inner { display:flex; flex-direction:column; gap:18px; width:min(76vw, 980px); padding:0 0 10vh clamp(52px, 6vw, 92px); }
+          .eyebrow { font-size:12px; letter-spacing:0.18em; text-transform:uppercase; }
+          .hero-rule { width:180px; height:2px; background:#ff3300; }
+          .swiss-title { margin:0; max-width:min(68vw, 860px); font-family:"Archivo Black", sans-serif; font-size:72px; line-height:0.98; letter-spacing:-0.045em; text-transform:uppercase; }
+          .hero-sub { max-width:34rem; font-family:"Nunito", sans-serif; font-size:18px; line-height:1.7; color:#666; }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-1" data-export-role="title_grid">
+          <div class="bg-num">01</div>
+          <div class="hero-inner">
+            <div class="eyebrow">Question the Frame</div>
+            <div class="hero-rule"></div>
+            <h1 class="swiss-title">Operational Clarity<br>Compounds Value</h1>
+            <p class="hero-sub">Put operating discipline, AI execution, and long-term value back on one decision line.</p>
+          </div>
+          <span class="slide-num-label">01 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-title-canonical-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-title-canonical.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'canonical', slide
+    assert slide['exportRole'] == 'title_grid', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    custom_root = next(
+        (elem for elem in slide['elements'] if elem.get('_component_contract') == 'swiss_title_grid'),
+        None,
+    )
+    assert custom_root is not None, slide['elements']
+
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
+    eyebrow = next(elem for elem in texts if elem.get('text') == 'Question the Frame')
+    title = next(elem for elem in texts if elem.get('text') == 'Operational Clarity\nCompounds Value')
+    subtitle = next(elem for elem in texts if elem.get('text', '').startswith('Put operating discipline'))
+    rule = next(shape for shape in shapes if shape.get('styles', {}).get('backgroundColor') == '#ff3300')
+
+    assert eyebrow['bounds']['x'] < 1.2, eyebrow['bounds']
+    assert title['bounds']['y'] > 3.5, title['bounds']
+    assert eyebrow['bounds']['y'] < title['bounds']['y'], (eyebrow['bounds'], title['bounds'])
+    assert rule['bounds']['y'] > eyebrow['bounds']['y'], (rule['bounds'], eyebrow['bounds'])
+    assert subtitle['bounds']['y'] > title['bounds']['y'], (subtitle['bounds'], title['bounds'])
+    print("  PASS: canonical Swiss title grid anchors the hero block near the bottom-left")
+
+
+def test_parse_html_to_slides_swiss_compatible_title_grid_restores_rule_and_bottom_anchor():
+    """Compatible Swiss title grids should still restore the hero rule and respect the bottom-anchored title stack."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="kai-slide-creator v2.18.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; display:flex; flex-direction:column; justify-content:flex-end; padding-bottom:10vh; position:relative; overflow:hidden; background:#fff; }
+          .slide-content { flex:1; display:flex; flex-direction:column; justify-content:center; padding:clamp(1.5rem, 4vw, 4rem); }
+          .eyebrow { color:#ff3300; font-size:12px; letter-spacing:0.18em; text-transform:uppercase; }
+          .swiss-rule.red { width:200px; height:2px; background:#ff3300; border:none; margin:0; }
+          .swiss-title { max-width:80%; font-family:"Archivo Black", sans-serif; font-size:72px; line-height:1.0; letter-spacing:-0.02em; text-transform:uppercase; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+          .reveal { opacity:0; transform:translateY(30px); }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-1">
+          <div class="slide-content content">
+            <div class="eyebrow reveal">Question the Frame</div>
+            <hr class="swiss-rule red reveal">
+            <h1 class="swiss-title reveal">Operational Clarity<br>Compounds Value</h1>
+          </div>
+          <span class="slide-num-label">01 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-title-compatible-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-title-compatible.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'compatible', slide
+    assert slide['exportRole'] == 'title_grid', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    custom_root = next(
+        (elem for elem in slide['elements'] if elem.get('_component_contract') == 'swiss_title_grid'),
+        None,
+    )
+    assert custom_root is not None, slide['elements']
+
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
+    title = next(elem for elem in texts if elem.get('text') == 'Operational Clarity\nCompounds Value')
+    rule = next(shape for shape in shapes if shape.get('styles', {}).get('backgroundColor') == '#ff3300')
+
+    assert title['bounds']['y'] > 4.0, title['bounds']
+    assert title['bounds']['x'] < 1.1, title['bounds']
+    assert rule['bounds']['width'] > 1.5, rule['bounds']
+    print("  PASS: compatible Swiss title grid restores the hidden rule and bottom anchor")
+
+
+def test_parse_html_to_slides_swiss_canonical_column_content_preserves_full_height_left_rail():
+    """Canonical Swiss column slides should build a full-height left rail instead of stacking the two panels vertically."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.21.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; display:flex; position:relative; overflow:hidden; background:#fff; }
+          #slide-2 { flex-direction:row; align-items:stretch; }
+          .bg-num { position:absolute; right:24px; top:0; font-family:"Archivo Black", sans-serif; font-size:220px; color:#f0f0f0; line-height:0.85; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+          .left-panel { flex:0 0 38%; display:flex; flex-direction:column; justify-content:center; gap:20px; padding:60px; background:#0a0a0a; color:#fff; }
+          .left-panel h2 { margin:0; font-family:"Archivo Black", sans-serif; font-size:52px; line-height:1.0; text-transform:uppercase; }
+          .left-rule { width:74px; height:2px; background:#ff3300; }
+          .swiss-body { font-family:"Nunito", sans-serif; font-size:16px; line-height:1.7; }
+          .right-panel { flex:1; padding:60px; column-count:2; column-gap:32px; }
+          .right-panel p { margin:0 0 1em; font-family:"Nunito", sans-serif; font-size:16px; line-height:1.7; }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-2" data-export-role="column_content">
+          <div class="bg-num">02</div>
+          <div class="left-panel">
+            <h2>Column Story</h2>
+            <div class="left-rule"></div>
+            <p class="swiss-body">The left editorial rail should stay vertically centered inside a full-height black panel.</p>
+          </div>
+          <div class="right-panel swiss-body-columns">
+            <p>Paragraph Alpha keeps the first rail occupied with enough words to wrap naturally.</p>
+            <p>Paragraph Beta continues the typographic flow without turning into one giant textbox.</p>
+            <p>Paragraph Gamma should begin in the second column once the first rail is sufficiently filled.</p>
+          </div>
+          <span class="slide-num-label">02 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-canonical-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-canonical.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'canonical', slide
+    assert slide['exportRole'] == 'column_content', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    left_bg = next((shape for shape in shapes if shape.get('styles', {}).get('backgroundColor') == '#0a0a0a'), None)
+    assert left_bg is not None, shapes
+    assert left_bg['bounds']['height'] > 6.5, left_bg['bounds']
+
+    title = next(elem for elem in texts if elem.get('text') == 'Column Story')
+    paragraphs = [elem for elem in texts if elem.get('text', '').startswith('Paragraph')]
+    assert len({round(elem['bounds']['x'], 2) for elem in paragraphs}) >= 2, [elem['bounds'] for elem in paragraphs]
+    assert title['bounds']['x'] < min(elem['bounds']['x'] for elem in paragraphs), (
+        title['bounds'],
+        [elem['bounds'] for elem in paragraphs],
+    )
+    print("  PASS: canonical Swiss column content keeps the full-height left rail")
+
+
+def test_parse_html_to_slides_swiss_compatible_stat_block_uses_thin_divider_not_black_block():
+    """Compatible Swiss stat slides should separate metric and copy rails with a thin divider instead of a giant black rectangle."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="kai-slide-creator v2.18.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; display:flex; flex-direction:row; align-items:center; position:relative; background:#fff; }
+          .slide-content { flex:1; display:flex; flex-direction:column; justify-content:center; padding:48px; }
+          .content { position:relative; z-index:1; }
+          .stat-block { flex:0 0 50%; }
+          .swiss-stat { display:inline-block; font-family:"Archivo Black", sans-serif; font-size:96px; line-height:1.0; border-bottom:2px solid #ff3300; margin-bottom:16px; }
+          .content-block { flex:1; padding-left:32px; border-left:2px solid #0a0a0a; }
+          .content-block .eyebrow { font-size:12px; letter-spacing:0.18em; text-transform:uppercase; margin-bottom:8px; }
+          .content-block p { font-family:"Nunito", sans-serif; font-size:16px; line-height:1.7; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-3" data-export-role="stat_block">
+          <div class="slide-content content">
+            <div class="stat-block">
+              <div class="swiss-stat">2.3B</div>
+              <p>AI booking volume</p>
+            </div>
+            <div class="content-block">
+              <div class="eyebrow">Execution</div>
+              <p>AI orders are flowing through product usage and contract expansion rather than a one-quarter story.</p>
+              <p>The exporter should preserve a clean split rail instead of inventing a giant black background block.</p>
+            </div>
+          </div>
+          <span class="slide-num-label">03 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-stat-compatible-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-stat-compatible.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'compatible', slide
+    assert slide['exportRole'] == 'stat_block', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
+    metric = next(elem for elem in texts if elem.get('text') == '2.3B')
+    copy = next(elem for elem in texts if elem.get('text', '').startswith('AI orders are flowing'))
+    black_shapes = [shape for shape in shapes if shape.get('styles', {}).get('backgroundColor') == '#0a0a0a']
+
+    assert metric['bounds']['x'] < copy['bounds']['x'], (metric['bounds'], copy['bounds'])
+    assert metric['bounds']['height'] > 0.9, metric['bounds']
+    assert black_shapes, shapes
+    assert all(shape['bounds']['width'] < 0.08 for shape in black_shapes), [shape['bounds'] for shape in black_shapes]
+    print("  PASS: compatible Swiss stat block uses a thin divider and separated rails")
+
+
+def test_parse_html_to_slides_swiss_canonical_pull_quote_preserves_left_offset_and_top_margin():
+    """Canonical Swiss pull quotes should honor the authored left offset and top margin instead of recentering the quote stack."""
+    html = '''
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.21.0">
+        <style>
+          body { background:#fff; }
+          .slide { width:100vw; height:100vh; position:relative; overflow:hidden; background:#fff; }
+          .slide-num-label { position:absolute; top:24px; right:24px; font-size:14px; color:#ff3300; }
+          .pull-quote { display:flex; flex-direction:column; gap:18px; width:min(60vw, 700px); margin:18vh 0 0 clamp(54px, 7vw, 108px); }
+          .quote-text { margin:0; font-family:"Archivo Black", sans-serif; font-size:66px; line-height:1.02; letter-spacing:-0.035em; }
+          .quote-rule { width:160px; height:2px; background:#ff3300; }
+          .quote-attribution { margin:0; font-family:"Nunito", sans-serif; font-size:15px; line-height:1.6; letter-spacing:0.1em; text-transform:uppercase; color:#666; }
+          .swiss-body { margin:0; max-width:34rem; font-family:"Nunito", sans-serif; font-size:17px; line-height:1.72; color:#666; }
+        </style>
+      </head>
+      <body data-preset="Swiss Modern">
+        <section class="slide" id="slide-5" data-export-role="pull_quote">
+          <div class="pull-quote">
+            <p class="quote-text">Hold the Root</p>
+            <div class="quote-rule"></div>
+            <p class="quote-attribution">Analects · Swiss Reading</p>
+            <p class="swiss-body">The quote block should stay left anchored with a deliberate top offset instead of drifting to the vertical center.</p>
+          </div>
+          <span class="slide-num-label">05 / 05</span>
+        </section>
+      </body>
+    </html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-swiss-pull-canonical-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'swiss-pull-canonical.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    slide = slides[0]
+    assert slide['exportSupportTier'] == 'canonical', slide
+    assert slide['exportRole'] == 'pull_quote', slide
+    layout_slide_elements(slide['elements'], 13.33, 810 / 108, slide['slideStyle'], slide)
+
+    custom_root = next(
+        (elem for elem in slide['elements'] if elem.get('_component_contract') == 'swiss_pull_quote'),
+        None,
+    )
+    assert custom_root is not None, slide['elements']
+
+    texts = _collect_elements_by_type(slide['elements'], 'text')
+    shapes = _collect_elements_by_type(slide['elements'], 'shape')
+    quote = next(elem for elem in texts if elem.get('text') == 'Hold the Root')
+    attribution = next(elem for elem in texts if elem.get('text') == 'Analects · Swiss Reading')
+    body = next(elem for elem in texts if elem.get('text', '').startswith('The quote block should stay'))
+    rule = next(shape for shape in shapes if shape.get('styles', {}).get('backgroundColor') == '#ff3300')
+
+    assert 0.7 <= quote['bounds']['x'] <= 1.2, quote['bounds']
+    assert 1.0 <= quote['bounds']['y'] <= 1.8, quote['bounds']
+    assert attribution['bounds']['y'] > quote['bounds']['y'], (attribution['bounds'], quote['bounds'])
+    assert body['bounds']['x'] == quote['bounds']['x'], (body['bounds'], quote['bounds'])
+    assert rule['bounds']['y'] > quote['bounds']['y'], (rule['bounds'], quote['bounds'])
+    print("  PASS: canonical Swiss pull quote keeps the authored left/top anchor")
+
+
+def test_classify_slide_layout_prefers_data_export_role_hint_when_multiple_roles_match():
+    contract = {
+        'layout_contracts': {
+            'column_content': {
+                'canonical': {
+                    'direct_child_any': ['.shared-layout'],
+                },
+            },
+            'pull_quote': {
+                'canonical': {
+                    'direct_child_any': ['.shared-layout'],
+                },
+            },
+        },
+        'support_tiers': {'canonical': {}},
+    }
+    slide = BeautifulSoup(
+        '''
+        <section class="slide" data-export-role="pull_quote">
+          <div class="shared-layout"></div>
+        </section>
+        ''',
+        'lxml',
+    ).find('section')
+
+    layout = export_sandbox._classify_slide_layout(slide, contract)
+
+    assert layout['support_tier'] == 'canonical', layout
+    assert layout['role'] == 'pull_quote', layout
+    print("  PASS: data-export-role hint biases contract layout classification")
 
 
 def test_media_query_max_height_does_not_override_large_heading_at_default_viewport():
@@ -1392,6 +1844,39 @@ def test_layout_slide_elements_respects_slide_justify_center():
     assert top_y > 2.4, [elem['bounds'] for elem in elements]
     assert elements[1]['bounds']['y'] > elements[0]['bounds']['y'], [elem['bounds'] for elem in elements]
     print("  PASS: layout_slide_elements vertically centers justify-content:center slides")
+
+
+def test_layout_slide_elements_respects_slide_justify_flex_end():
+    """Slide roots authored with justify-content:flex-end should anchor the content block to the bottom runway."""
+    elements = [
+        {
+            'type': 'text',
+            'tag': 'h1',
+            'text': 'Anchored title',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 3.2, 'height': 0.7},
+            'styles': {'fontSize': '42px', 'lineHeight': '42px'},
+        },
+        {
+            'type': 'text',
+            'tag': 'p',
+            'text': 'Anchored body',
+            'bounds': {'x': 0.5, 'y': 0.5, 'width': 4.2, 'height': 0.4},
+            'styles': {'fontSize': '18px', 'lineHeight': '28px', 'marginTop': '16px'},
+        },
+    ]
+    slide_style = {
+        'display': 'flex',
+        'flexDirection': 'column',
+        'justifyContent': 'flex-end',
+        'paddingTop': '54px',
+        'paddingBottom': '108px',
+    }
+    layout_slide_elements(elements, slide_height_in=810 / 108, slide_style=slide_style)
+    top_y = min(elem['bounds']['y'] for elem in elements)
+    bottom_y = max(elem['bounds']['y'] + elem['bounds']['height'] for elem in elements)
+    assert top_y > 4.8, [elem['bounds'] for elem in elements]
+    assert bottom_y <= (810 / 108) - 0.95, [elem['bounds'] for elem in elements]
+    print("  PASS: layout_slide_elements anchors justify-content:flex-end slides to bottom runway")
 
 
 def test_layout_slide_elements_ignores_skip_layout_overlays_when_centering():
@@ -2833,11 +3318,50 @@ def _chinese_chan_contract_fixture():
     }
 
 
+def _swiss_modern_contract_fixture():
+    return {
+        'contract_id': 'slide-creator/swiss-modern',
+        'typography': {
+            'display_font_stack': ['Archivo Black', 'Arial Black', 'Helvetica Neue', 'sans-serif'],
+            'body_font_stack': ['Nunito', 'Helvetica Neue', 'Arial', 'sans-serif'],
+            'label_font_stack': ['Archivo', 'Helvetica Neue', 'Arial', 'sans-serif'],
+            'role_selectors': {
+                'title': ['.swiss-title', '.quote-text'],
+                'body': ['.swiss-body', '.quote-attribution'],
+                'label': ['.eyebrow', '.slide-num-label'],
+                'metric': ['.swiss-stat'],
+            },
+            'title': {'family_mode': 'display_sans', 'weight': 900, 'line_height': 1.0, 'letter_spacing': '-0.02em'},
+            'body': {'family_mode': 'body_sans', 'weight': 400, 'line_height': 1.55},
+            'label': {'family_mode': 'label_sans', 'weight': 700, 'line_height': 1.2, 'letter_spacing': '0.08em'},
+            'metric': {'family_mode': 'display_sans', 'weight': 900, 'line_height': 1.0},
+        },
+        'line_break_contract': {
+            'break_policy': {
+                '.swiss-title': 'prefer_preserve',
+                '.quote-text': 'prefer_preserve',
+                '.swiss-body': 'preserve',
+                '.quote-attribution': 'preserve',
+            },
+            'shrink_forbidden_for': ['.swiss-title', '.quote-text', '.swiss-stat', '.quote-attribution'],
+            'overflow_strategy': 'expand_container_first',
+        },
+    }
+
+
 def test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script():
     """Mixed-script serif stacks should keep Latin serif for Latin glyphs and CJK serif for East Asian glyphs."""
     css_stack = '"Noto Serif SC", "EB Garamond", Georgia, serif'
     assert map_font(css_stack, text='零依赖 HTML 演示文稿') == ('Baskerville', 'Songti SC')
     print("  PASS: mixed-script serif stack keeps Latin+CJK serif pair")
+
+
+def test_map_font_swiss_display_stack_prefers_archivo_fallback_for_latin():
+    """Swiss display stacks should keep a heavy Latin display face for Latin-only headlines."""
+    latin_font, ea_font = map_font('"Archivo Black", "Nunito", "Noto Sans SC", sans-serif', text='SWISS')
+    assert latin_font == 'Arial Black', (latin_font, ea_font)
+    assert ea_font == 'Arial Black', (latin_font, ea_font)
+    print("  PASS: Swiss display stack keeps heavy Latin fallback")
 
 
 def test_resolve_text_contract_chinese_chan_preserves_body_breaks():
@@ -2895,6 +3419,25 @@ def test_resolve_text_contract_chinese_chan_body_prefers_wrap_for_long_prose():
     assert resolved['preferWrapToPreserveSize'] is True, resolved
     assert resolved['shrinkForbidden'] is True, resolved
     print("  PASS: Chinese Chan long body prose prefers wrap over no-wrap heuristics")
+
+
+def test_resolve_text_contract_swiss_title_uses_display_stack_and_preserves_width():
+    """Swiss display titles should use the synced display stack and prefer wrap over shrink."""
+    resolver = _require_symbol('_resolve_text_contract')
+    if resolver is None:
+        return
+
+    soup = BeautifulSoup('<div class="swiss-title">HELVETIC ORDER</div>', 'html.parser')
+    node = soup.find('div')
+    contract = _swiss_modern_contract_fixture()
+    resolved = resolver(node, {'fontFamily': ''}, 'HELVETIC ORDER', contract)
+
+    assert resolved['role'] == 'title', resolved
+    assert resolved['breakPolicy'] == 'prefer_preserve', resolved
+    assert resolved['preferWrapToPreserveSize'] is True, resolved
+    assert resolved['shrinkForbidden'] is True, resolved
+    assert 'Archivo Black' in resolved.get('fontFamily', ''), resolved
+    print("  PASS: Swiss title contract preserves display font and width rhythm")
 
 
 def test_build_table_element_plain_td_defaults_to_text_primary():
@@ -2995,6 +3538,23 @@ def test_build_text_element_medium_card_prose_adjusts_back_to_single_line():
 
     assert text_el['bounds']['height'] < 0.30, text_el['bounds']
     print("  PASS: medium card prose falls back to single-line fit")
+
+
+def test_build_text_element_long_editorial_prose_skips_no_wrap_fit():
+    """Wide editorial prose that already estimates as multiline should not be forced back into no-wrap fit."""
+    html = '''
+    <p style="font-size:16px;line-height:1.55;max-width:718px;color:#3f3f46;">
+      AI订单的快速放量，正是知行合一的结果。不是喊一句“AI转型”的口号，而是实实在在把AI能力注入星瀚、星空、星辰等核心产品，切切实实帮客户提升效率，自然得到市场的认可。
+    </p>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    p = soup.find('p')
+    style = compute_element_style(p, [], p.get('style', ''))
+    text_el = build_text_element(p, style, [], 1440, 718)
+
+    assert text_el.get('preferNoWrapFit') is False, text_el
+    assert text_el['bounds']['height'] > 0.45, text_el['bounds']
+    print("  PASS: long editorial prose keeps multiline width rhythm")
 
 
 def test_build_text_element_centered_subtitle_prefers_full_max_width_and_no_wrap_fit():
@@ -3320,6 +3880,89 @@ def test_export_text_element_prefers_wrap_to_preserve_size_for_body_prose():
     assert tf.word_wrap is True, tf.word_wrap
     assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
     print("  PASS: contract-preferred body prose wraps before shrinking")
+
+
+def test_export_text_element_single_line_contract_title_stays_no_wrap():
+    """Single-line contract titles that already fit should not invite PowerPoint-only re-wraps."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'p',
+        'text': '君子务本，本立而道生',
+        'segments': [
+            {'text': '君子务本，本立而道生', 'color': '#111111', 'fontSize': '66px', 'fontFamily': '"Archivo Black", "Noto Sans SC", sans-serif', 'letterSpacing': '-0.04em', 'bold': True, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+        ],
+        'bounds': {'x': 0.93, 'y': 1.5, 'width': 6.48, 'height': 0.63},
+        'naturalHeight': 0.63,
+        'preferWrapToPreserveSize': True,
+        'shrinkForbidden': True,
+        '_text_contract_role': 'title',
+        'styles': {
+            'fontSize': '66px',
+            'fontWeight': '900',
+            'fontFamily': '"Archivo Black", "Noto Sans SC", sans-serif',
+            'letterSpacing': '-0.04em',
+            'color': '#111111',
+            'textAlign': 'left',
+            'lineHeight': '1.02',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (250, 250, 248))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is False, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: single-line contract title stays no-wrap")
+
+
+def test_export_text_element_wide_multiline_prose_wraps_from_measured_height():
+    """Generic wide editorial prose should still wrap when layout already measured it as multiline."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'p',
+        'text': 'AI订单的快速放量，正是知行合一的结果。不是喊一句“AI转型”的口号，而是实实在在把AI能力注入星瀚、星空、星辰等核心产品，切切实实帮客户提升效率，自然得到市场的认可。',
+        'segments': [
+            {'text': 'AI订单的快速放量，正是知行合一的结果。不是喊一句“AI转型”的口号，而是实实在在把AI能力注入星瀚、星空、星辰等核心产品，切切实实帮客户提升效率，自然得到市场的认可。', 'color': '#111111', 'fontSize': '16px', 'fontFamily': 'Helvetica', 'letterSpacing': '', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+        ],
+        'bounds': {'x': 6.68, 'y': 3.15, 'width': 6.65, 'height': 0.54},
+        'naturalHeight': 0.54,
+        'styles': {
+            'fontSize': '16px',
+            'fontWeight': '400',
+            'fontFamily': 'Helvetica',
+            'letterSpacing': '',
+            'color': '#111111',
+            'textAlign': 'left',
+            'lineHeight': '1.6',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (250, 250, 248))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is True, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: wide measured multiline prose wraps before export")
 
 
 def test_build_text_element_centered_block_command_shrinkwraps():
@@ -4201,9 +4844,12 @@ def run_tests():
     test_parse_grid_track_widths_handles_split_and_auto_fit()
     test_collect_export_context_loads_enterprise_dark_contract_and_body_grid()
     test_collect_export_context_loads_data_story_contract_and_body_grid()
+    test_collect_export_context_loads_swiss_modern_contract_with_layout_tiers()
     test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback()
     test_slide_creator_contract_manifest_tracks_upstream_and_data_story()
     test_sync_slide_creator_contracts_builds_data_story_contract()
+    test_sync_slide_creator_contracts_builds_swiss_modern_contract()
+    test_parse_html_to_slides_swiss_compatible_wrapper_unwraps_and_preserves_two_columns()
     test_media_query_max_height_does_not_override_large_heading_at_default_viewport()
     test_short_latin_inline_block_label_uses_compact_width()
     test_enterprise_dark_split_cards_stack_in_right_column()
@@ -4240,6 +4886,7 @@ def run_tests():
     test_parse_html_to_slides_clones_body_fixed_brand_mark_for_each_slide()
     test_centered_flex_wrap_preserves_intrinsic_metric_stack_widths()
     test_layout_slide_elements_respects_slide_justify_center()
+    test_layout_slide_elements_respects_slide_justify_flex_end()
     test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()
     test_flat_extract_skips_display_none_elements()
     test_flat_extract_text_only_inline_flex_container_emits_text()
@@ -4313,9 +4960,11 @@ def run_tests():
     test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font()
     test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack()
     test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script()
+    test_map_font_swiss_display_stack_prefers_archivo_fallback_for_latin()
     test_resolve_text_contract_chinese_chan_preserves_body_breaks()
     test_resolve_text_contract_chinese_chan_title_prefers_wrap_over_shrink()
     test_resolve_text_contract_chinese_chan_body_prefers_wrap_for_long_prose()
+    test_resolve_text_contract_swiss_title_uses_display_stack_and_preserves_width()
     test_build_table_element_plain_td_defaults_to_text_primary()
     test_flat_extract_mixed_inline_code_uses_inline_overlays()
     test_flat_extract_inline_code_in_prose_does_not_emit_detached_code_bg()

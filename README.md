@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.4.0`
+Current release: `v1.5.0`
 
 ## 中文说明
 
@@ -35,15 +35,24 @@ Current release: `v1.4.0`
   - `card containment = 0`
   - `element gaps = 0`
   - `total actionable = 0`
+- `Swiss Modern`
+  - 约束路径：`canonical + constrained compatible`
+  - 最新真实回归样本：`kingdee_from_original_v7.pptx`
+  - 最新完整视觉对比分数：`9.36/10`
+  - 已确认文件级文字语义：
+  - `P3 body wrap = square`
+  - `P5 title wrap = none`
 
 整体上，这条分支已经明显从“按页打补丁”转成了“增强 exporter 通用能力 + producer-aware preset contract”。仍未达到“所有风格都稳定每页 >= 9.5”的最终目标，但 `Chinese Chan` 这类高度依赖字体与换行节奏的 preset 已经被真正拉上来。
 
-最近新增并持续强化的，是一条 `slide-creator` contract-driven 路径，正在把 `data-story / enterprise-dark / chinese-chan` 这类新风格从“启发式近似”推进到“基于 preset contract 的组件与排版导出”。其中 `Chinese Chan` 已经补上：
+最近新增并持续强化的，是一条 `slide-creator` contract-driven 路径，正在把 `data-story / enterprise-dark / chinese-chan / swiss-modern` 这类新风格从“启发式近似”推进到“基于 preset contract 的组件与排版导出”。其中 `Chinese Chan` 和 `Swiss Modern` 已经补上：
 
 - typography contract
 - authored line-break contract
 - shared runtime chrome fallback
 - centered command / seal fidelity gate
+- role-aware Swiss layout builders
+- title/body wrap guards against PowerPoint-only reflow
 
 ### 主要能力
 
@@ -97,15 +106,15 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 可选参数：
 
 ```bash
-python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--no-chrome]
+python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--with-chrome]
 ```
 
 - `--width`
   幻灯片宽度，默认 `1440`
 - `--height`
   幻灯片高度，默认 `810`
-- `--no-chrome`
-  跳过页码和导航点
+- `--with-chrome`
+  额外添加 exporter 提供的页码和导航点
 
 ### 验证流程
 
@@ -116,32 +125,36 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.4.0 更新重点
+### v1.5.0 更新重点
 
-- 新增并同步 vendored `Chinese Chan` preset contract
-- render 前 text contract 已覆盖：
-  - mixed-script serif font mapping
-  - `preserveAuthoredBreaks`
-  - `preferWrapToPreserveSize`
-  - shrink-forbidden body prose
-- `slide-creator` 未 vendored preset 现在也会走 shared runtime chrome fallback，避免 `.progress-bar / .nav-dots` 误导出
-- `Chinese Chan` 的 `P8` 收口到通用 fidelity 规则：
-  - decoration shape 不再丢 border contract
-  - pure border shell 默认不再加 ambient shadow
-  - centered command card 按 authored content column 居中检查
-- roundtrip XML regression 继续扩展，直接校验：
-  - wrap / auto-size
-  - authored column width
-  - no page overflow
-  - seal border / centered command fidelity
+- `Swiss Modern` vendored contract 从 metadata shell 扩到可执行契约：
+  - `support_tiers`
+  - `layout_contracts`
+  - `signature_elements`
+  - typography / line-break contract
+- runtime 现在真正消费 `Swiss Modern` 组件语义：
+  - `title_grid`
+  - `column_content`
+  - `stat_block`
+  - `pull_quote`
+- 文字 fidelity 继续收口到文件级行为：
+  - 宽列正文不再被误判成 `preferNoWrapFit`
+  - 单行 contract title 在测量已足够时保持 `no-wrap`
+  - P3 / P5 已直接通过 roundtrip PPTX XML 确认
+- 回归测试继续扩展，覆盖：
+  - Swiss contract sync
+  - compatible wrapper unwrap
+  - wide multiline prose wrap
+  - single-line title no-wrap guard
 
 ### 已知边界
 
 - 还没有实现和 native golden 完全一致
+- 当前 `Swiss Modern` 仍是 `canonical + constrained compatible`，不是任意 Swiss-like HTML 的通用保真引擎
 - 当前低分主要集中在：
-  - Slide 10 closing card 的几何宽度与 paragraph model
-  - 若干页面的小标题/图标深墨色与 golden 黑色之间的细微差异
-  - 部分 card 的高度和内部节奏仍有轻微漂移
+  - canonical Swiss 的 `title_grid / column_content` 光学节奏仍有漂移
+  - 若干页面的标题尺度与版心还没完全贴齐 reference
+  - 本机 office-render compare 仍不是理想的最终视觉判分器
 
 ## English
 
@@ -173,8 +186,15 @@ The current validation anchors are:
   - `card containment = 0`
   - `element gaps = 0`
   - `total actionable = 0`
+- `Swiss Modern`
+  - Constraint path: `canonical + constrained compatible`
+  - Latest real regression artifact: `kingdee_from_original_v7.pptx`
+  - Latest completed visual compare: `9.36/10`
+  - Confirmed file-level text semantics:
+  - `P3 body wrap = square`
+  - `P5 title wrap = none`
 
-This branch has not yet reached the final goal of “every style, every slide >= 9.5”, but it is now substantially more generalized than the earlier slide-by-slide patching phase. The exporter now enforces preset-aware typography and break fidelity for serif/editorial decks such as `Chinese Chan`, not just generic geometry.
+This branch has not yet reached the final goal of “every style, every slide >= 9.5”, but it is now substantially more generalized than the earlier slide-by-slide patching phase. The exporter now enforces preset-aware typography and break fidelity for decks such as `Chinese Chan` and `Swiss Modern`, not just generic geometry.
 
 ### Core Capabilities
 
@@ -228,15 +248,15 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 Optional flags:
 
 ```bash
-python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--no-chrome]
+python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--with-chrome]
 ```
 
 - `--width`
   Slide width in pixels. Default: `1440`
 - `--height`
   Slide height in pixels. Default: `810`
-- `--no-chrome`
-  Skip page counter and nav dots
+- `--with-chrome`
+  Add exporter-provided page counter and nav dots
 
 ### Validation Workflow
 
@@ -247,26 +267,31 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.4.0 Highlights
+### v1.5.0 Highlights
 
-- Added a vendored `Chinese Chan` preset contract under `contracts/slide_creator/`
-- Export runtime now enforces preset-aware text contracts for serif/editorial decks:
-  - mixed-script serif font mapping
-  - authored break preservation
-  - wrap-before-shrink behavior
-- Unknown `slide-creator` presets now still get shared runtime chrome filtering
-- `Chinese Chan` closing-slide fidelity improved through:
-  - preserved seal border contracts
-  - no-shadow border-shell rendering
-  - centered command-row roundtrip checks against the authored content column
-- XML roundtrip regression coverage expanded again for wrap fidelity, page-overflow guards, and preset-specific closing-slide structure
+- Expanded the vendored `Swiss Modern` preset contract into an executable runtime contract:
+  - `support_tiers`
+  - `layout_contracts`
+  - `signature_elements`
+  - typography and line-break rules
+- Export runtime now consumes Swiss component semantics for:
+  - `title_grid`
+  - `column_content`
+  - `stat_block`
+  - `pull_quote`
+- Text fidelity tightened again at file-behavior level:
+  - wide editorial prose no longer falls into accidental no-wrap fit
+  - single-line contract titles stay no-wrap when browser-width measurement already fits
+  - P3 / P5 wrap behavior is now regression-checked from roundtrip PPTX XML
+- Regression coverage expanded for Swiss contract sync, wrapper unwrap, multiline prose wrap, and single-line title guards
 
 ### Known Gaps
 
 - The exporter still does not fully match the native golden deck
+- `Swiss Modern` is still a `canonical + constrained compatible` path, not a generic Swiss-like HTML fidelity engine
 - Remaining lower-score areas are concentrated in:
-  - Slide 10 closing card geometry and paragraph model
-  - minor heading/icon ink differences on a few slides
-  - small card-height and internal-rhythm drift in selected layouts
+  - canonical Swiss optical rhythm on some title/split pages
+  - minor title scale / page-center drift on selected layouts
+  - local office-render compare limitations on this machine
 
 See [RELEASE.md](./RELEASE.md) for release notes.

@@ -26,7 +26,13 @@
     "#present-btn",
     "#present-counter"
   ],
-  "decorative_layers": [],
+  "decorative_layers": [
+    {
+      "selector": "body::before",
+      "kind": "swiss-grid",
+      "export_strategy": "background-layer"
+    }
+  ],
   "component_selectors": {
     "editorial_grid": [
       ".grid",
@@ -48,6 +54,10 @@
     ],
     "terminal_line": [
       ".terminal-line"
+    ],
+    "body_columns": [
+      ".right-col",
+      ".swiss-body-columns"
     ]
   },
   "component_slot_models": {
@@ -67,18 +77,117 @@
         "label",
         "link"
       ]
+    },
+    "body_columns": {
+      "layout": "typographic_columns",
+      "slots": [
+        "body_flow"
+      ],
+      "column_count": 2,
+      "column_gap_px": 32,
+      "compatibility_tier": "compatible"
     }
   },
   "layout_variations": [
-    "editorial-hero",
-    "swiss-grid",
-    "section-divider"
+    "title_grid",
+    "column_content",
+    "stat_block",
+    "pull_quote",
+    "geometric_diagram",
+    "contents_index",
+    "data_table"
   ],
   "text_expectations": {
-    "tabular_numbers": true
+    "tabular_numbers": true,
+    "single_red_accent_per_slide": true
   },
-  "typography": {},
-  "line_break_contract": {},
+  "typography": {
+    "display_font_stack": [
+      "Archivo Black",
+      "Arial Black",
+      "Helvetica Neue",
+      "sans-serif"
+    ],
+    "body_font_stack": [
+      "Nunito",
+      "Helvetica Neue",
+      "Arial",
+      "sans-serif"
+    ],
+    "label_font_stack": [
+      "Archivo",
+      "Helvetica Neue",
+      "Arial",
+      "sans-serif"
+    ],
+    "role_selectors": {
+      "title": [
+        ".swiss-title",
+        ".quote-text",
+        ".hero-title",
+        ".index-title"
+      ],
+      "body": [
+        ".swiss-body",
+        ".pain-desc",
+        ".quote-attribution",
+        ".disc-step-desc",
+        ".index-desc"
+      ],
+      "label": [
+        ".swiss-label",
+        ".label",
+        ".eyebrow",
+        ".slide-num-label",
+        ".pain-title"
+      ],
+      "metric": [
+        ".swiss-stat",
+        ".hero-stat-num",
+        ".pain-num",
+        ".index-num"
+      ]
+    },
+    "title": {
+      "family_mode": "display_sans",
+      "weight": 900,
+      "line_height": 1.0,
+      "letter_spacing": "-0.02em"
+    },
+    "body": {
+      "family_mode": "body_sans",
+      "weight": 400,
+      "line_height": 1.55
+    },
+    "label": {
+      "family_mode": "label_sans",
+      "weight": 700,
+      "line_height": 1.2,
+      "letter_spacing": "0.08em"
+    },
+    "metric": {
+      "family_mode": "display_sans",
+      "weight": 900,
+      "line_height": 1.0
+    }
+  },
+  "line_break_contract": {
+    "break_policy": {
+      ".swiss-title": "prefer_preserve",
+      ".quote-text": "prefer_preserve",
+      ".swiss-body": "preserve",
+      ".pain-desc": "preserve",
+      ".quote-attribution": "preserve"
+    },
+    "shrink_forbidden_for": [
+      ".swiss-title",
+      ".quote-text",
+      ".swiss-stat",
+      ".pain-desc",
+      ".quote-attribution"
+    ],
+    "overflow_strategy": "expand_container_first"
+  },
   "producer_detection": {
     "body_attrs": {
       "data-preset": "Swiss Modern",
@@ -88,8 +197,153 @@
     "watermark_contains": "By kai-slide-creator v"
   },
   "observed_component_classes": [
+    "bg-num",
+    "disc-body",
+    "disc-header",
     "feat-card",
     "swiss-label",
     "terminal-line"
-  ]
+  ],
+  "signature_elements": {
+    "page_grid": {
+      "selectors": [
+        "body::before"
+      ],
+      "export_strategy": "background-layer"
+    },
+    "bg_num": {
+      "selectors": [
+        ".bg-num"
+      ],
+      "export_strategy": "anchored-text"
+    },
+    "slide_num_label": {
+      "selectors": [
+        ".slide-num-label"
+      ],
+      "export_strategy": "anchored-text"
+    },
+    "hard_rule": {
+      "selectors": [
+        ".swiss-rule",
+        ".swiss-rule.red",
+        ".swiss-rule-thin"
+      ],
+      "export_strategy": "shape-divider"
+    }
+  },
+  "support_tiers": {
+    "canonical": {
+      "description": "Official Swiss demo family or guarded generated Swiss HTML."
+    },
+    "compatible": {
+      "description": "Swiss decks with a single content wrapper and approved structural aliases.",
+      "wrapper_selectors": [
+        ".slide-content",
+        ".content"
+      ]
+    },
+    "fallback": {
+      "description": "Producer detection only. No Swiss-specific layout guarantees."
+    }
+  },
+  "layout_contracts": {
+    "title_grid": {
+      "canonical": {
+        "direct_children_all": [
+          ".bg-num",
+          ".slide-num-label"
+        ],
+        "direct_children_any": [
+          ".hero-inner"
+        ]
+      },
+      "compatible": {
+        "wrapper_selectors": [
+          ".slide-content",
+          ".content"
+        ],
+        "wrapper_children_all": [
+          ".swiss-title"
+        ],
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "unwrap_wrapper": true
+      }
+    },
+    "column_content": {
+      "canonical": {
+        "direct_children_all": [
+          ".left-panel",
+          ".right-panel",
+          ".slide-num-label"
+        ]
+      },
+      "compatible": {
+        "wrapper_selectors": [
+          ".slide-content",
+          ".content"
+        ],
+        "wrapper_children_all": [
+          ".left-col",
+          ".right-col"
+        ],
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "unwrap_wrapper": true
+      }
+    },
+    "stat_block": {
+      "canonical": {
+        "direct_children_all": [
+          ".stat-row",
+          ".slide-num-label"
+        ]
+      },
+      "compatible": {
+        "wrapper_selectors": [
+          ".slide-content",
+          ".content"
+        ],
+        "wrapper_children_all": [
+          ".stat-block",
+          ".content-block"
+        ],
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "unwrap_wrapper": true
+      }
+    },
+    "pull_quote": {
+      "canonical": {
+        "direct_children_all": [
+          ".pull-quote",
+          ".slide-num-label"
+        ]
+      },
+      "compatible": {
+        "wrapper_selectors": [
+          ".slide-content",
+          ".content"
+        ],
+        "wrapper_children_all": [
+          ".quote-block"
+        ],
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "unwrap_wrapper": true
+      }
+    }
+  },
+  "style_constraints": {
+    "max_red_accent_per_slide": 1,
+    "allow_gradients": false,
+    "allow_shadows": false,
+    "allow_rounded_corners": false,
+    "require_asymmetric_title_anchor": true
+  }
 }

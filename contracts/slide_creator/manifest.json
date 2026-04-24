@@ -80,6 +80,11 @@
       "demo_refs": [
         "demos/swiss-modern-zh.html",
         "demos/swiss-modern-en.html"
+      ],
+      "support_tiers": [
+        "canonical",
+        "compatible",
+        "fallback"
       ]
     },
     {

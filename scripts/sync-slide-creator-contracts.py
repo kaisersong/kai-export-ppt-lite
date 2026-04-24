@@ -253,13 +253,20 @@ PRESET_SPECS: Dict[str, Dict[str, Any]] = {
             "demos/swiss-modern-zh.html",
             "demos/swiss-modern-en.html",
         ],
-        "decorative_layers": [],
+        "decorative_layers": [
+            {
+                "selector": "body::before",
+                "kind": "swiss-grid",
+                "export_strategy": "background-layer",
+            }
+        ],
         "component_selectors": {
             "editorial_grid": [".grid", ".editorial-grid"],
             "section_label": [".swiss-label", ".label", ".eyebrow"],
             "card": [".swiss-card", ".feat-card", ".pain-item"],
             "rule": [".swiss-rule", ".swiss-rule-thin"],
             "terminal_line": [".terminal-line"],
+            "body_columns": [".right-col", ".swiss-body-columns"],
         },
         "component_slot_models": {
             "card": {
@@ -270,13 +277,176 @@ PRESET_SPECS: Dict[str, Dict[str, Any]] = {
                 "layout": "inline_command_row",
                 "slots": ["command", "label", "link"],
             },
+            "body_columns": {
+                "layout": "typographic_columns",
+                "slots": ["body_flow"],
+                "column_count": 2,
+                "column_gap_px": 32,
+                "compatibility_tier": "compatible",
+            },
         },
         "layout_variations": [
-            "editorial-hero",
-            "swiss-grid",
-            "section-divider",
+            "title_grid",
+            "column_content",
+            "stat_block",
+            "pull_quote",
+            "geometric_diagram",
+            "contents_index",
+            "data_table",
         ],
-        "text_expectations": {"tabular_numbers": True},
+        "text_expectations": {
+            "tabular_numbers": True,
+            "single_red_accent_per_slide": True,
+        },
+        "typography": {
+            "display_font_stack": [
+                "Archivo Black",
+                "Arial Black",
+                "Helvetica Neue",
+                "sans-serif",
+            ],
+            "body_font_stack": [
+                "Nunito",
+                "Helvetica Neue",
+                "Arial",
+                "sans-serif",
+            ],
+            "label_font_stack": [
+                "Archivo",
+                "Helvetica Neue",
+                "Arial",
+                "sans-serif",
+            ],
+            "role_selectors": {
+                "title": [".swiss-title", ".quote-text", ".hero-title", ".index-title"],
+                "body": [".swiss-body", ".pain-desc", ".quote-attribution", ".disc-step-desc", ".index-desc"],
+                "label": [".swiss-label", ".label", ".eyebrow", ".slide-num-label", ".pain-title"],
+                "metric": [".swiss-stat", ".hero-stat-num", ".pain-num", ".index-num"],
+            },
+            "title": {
+                "family_mode": "display_sans",
+                "weight": 900,
+                "line_height": 1.0,
+                "letter_spacing": "-0.02em",
+            },
+            "body": {
+                "family_mode": "body_sans",
+                "weight": 400,
+                "line_height": 1.55,
+            },
+            "label": {
+                "family_mode": "label_sans",
+                "weight": 700,
+                "line_height": 1.2,
+                "letter_spacing": "0.08em",
+            },
+            "metric": {
+                "family_mode": "display_sans",
+                "weight": 900,
+                "line_height": 1.0,
+            },
+        },
+        "line_break_contract": {
+            "break_policy": {
+                ".swiss-title": "prefer_preserve",
+                ".quote-text": "prefer_preserve",
+                ".swiss-body": "preserve",
+                ".pain-desc": "preserve",
+                ".quote-attribution": "preserve",
+            },
+            "shrink_forbidden_for": [
+                ".swiss-title",
+                ".quote-text",
+                ".swiss-stat",
+                ".pain-desc",
+                ".quote-attribution",
+            ],
+            "overflow_strategy": "expand_container_first",
+        },
+        "signature_elements": {
+            "page_grid": {
+                "selectors": ["body::before"],
+                "export_strategy": "background-layer",
+            },
+            "bg_num": {
+                "selectors": [".bg-num"],
+                "export_strategy": "anchored-text",
+            },
+            "slide_num_label": {
+                "selectors": [".slide-num-label"],
+                "export_strategy": "anchored-text",
+            },
+            "hard_rule": {
+                "selectors": [".swiss-rule", ".swiss-rule.red", ".swiss-rule-thin"],
+                "export_strategy": "shape-divider",
+            },
+        },
+        "support_tiers": {
+            "canonical": {
+                "description": "Official Swiss demo family or guarded generated Swiss HTML.",
+            },
+            "compatible": {
+                "description": "Swiss decks with a single content wrapper and approved structural aliases.",
+                "wrapper_selectors": [".slide-content", ".content"],
+            },
+            "fallback": {
+                "description": "Producer detection only. No Swiss-specific layout guarantees.",
+            },
+        },
+        "layout_contracts": {
+            "title_grid": {
+                "canonical": {
+                    "direct_children_all": [".bg-num", ".slide-num-label"],
+                    "direct_children_any": [".hero-inner"],
+                },
+                "compatible": {
+                    "wrapper_selectors": [".slide-content", ".content"],
+                    "wrapper_children_all": [".swiss-title"],
+                    "direct_children_all": [".slide-num-label"],
+                    "unwrap_wrapper": True,
+                },
+            },
+            "column_content": {
+                "canonical": {
+                    "direct_children_all": [".left-panel", ".right-panel", ".slide-num-label"],
+                },
+                "compatible": {
+                    "wrapper_selectors": [".slide-content", ".content"],
+                    "wrapper_children_all": [".left-col", ".right-col"],
+                    "direct_children_all": [".slide-num-label"],
+                    "unwrap_wrapper": True,
+                },
+            },
+            "stat_block": {
+                "canonical": {
+                    "direct_children_all": [".stat-row", ".slide-num-label"],
+                },
+                "compatible": {
+                    "wrapper_selectors": [".slide-content", ".content"],
+                    "wrapper_children_all": [".stat-block", ".content-block"],
+                    "direct_children_all": [".slide-num-label"],
+                    "unwrap_wrapper": True,
+                },
+            },
+            "pull_quote": {
+                "canonical": {
+                    "direct_children_all": [".pull-quote", ".slide-num-label"],
+                },
+                "compatible": {
+                    "wrapper_selectors": [".slide-content", ".content"],
+                    "wrapper_children_all": [".quote-block"],
+                    "direct_children_all": [".slide-num-label"],
+                    "unwrap_wrapper": True,
+                },
+            },
+        },
+        "style_constraints": {
+            "max_red_accent_per_slide": 1,
+            "allow_gradients": False,
+            "allow_shadows": False,
+            "allow_rounded_corners": False,
+            "require_asymmetric_title_anchor": True,
+        },
     },
     "data-story": {
         "slug": "data-story",
@@ -432,7 +602,23 @@ def _collect_observed_classes(soup: BeautifulSoup) -> List[str]:
                 or class_name.startswith("ds-")
                 or class_name.startswith("ent-")
                 or class_name.startswith("swiss-")
-                or class_name in {"feat-card", "install-row", "install-label", "install-cmd", "terminal-line", "cmd"}
+                or class_name in {
+                    "feat-card",
+                    "install-row",
+                    "install-label",
+                    "install-cmd",
+                    "terminal-line",
+                    "cmd",
+                    "bg-num",
+                    "left-col",
+                    "right-col",
+                    "stat-block",
+                    "content-block",
+                    "quote-block",
+                    "pull-quote",
+                    "disc-header",
+                    "disc-body",
+                }
                 or class_name.startswith("chart-")
             ):
                 classes.add(class_name)
@@ -496,7 +682,7 @@ def build_contract(
         f"slide-creator@v{producer_version}" if producer_version else "slide-creator@unknown"
     )
 
-    return {
+    contract = {
         "producer": "slide-creator",
         "contract_id": f"slide-creator/{spec['slug']}",
         "preset": demo_meta.get("preset") or spec["preset"],
@@ -527,6 +713,11 @@ def build_contract(
         },
         "observed_component_classes": demo_meta.get("observed_component_classes", []),
     }
+    for key in ("signature_elements", "support_tiers", "layout_contracts", "style_constraints"):
+        value = spec.get(key)
+        if value:
+            contract[key] = value
+    return contract
 
 
 def build_manifest(
@@ -537,19 +728,21 @@ def build_manifest(
     presets = []
     for slug, spec in PRESET_SPECS.items():
         demo_meta = _collect_demo_metadata(slide_creator_root, spec["demo_refs"])
-        presets.append(
-            {
-                "slug": slug,
-                "preset": demo_meta.get("preset") or spec["preset"],
-                "contract_id": f"slide-creator/{slug}",
-                "contract_version": "1.0.0",
-                "family": spec["family"],
-                "producer_version_tested": demo_meta.get("producer_version_tested") or "unknown",
-                "contract_path": f"presets/{slug}.json",
-                "source_refs": _relative_paths(slide_creator_root, spec["reference_refs"]),
-                "demo_refs": _relative_paths(slide_creator_root, spec["demo_refs"]),
-            }
-        )
+        preset_entry = {
+            "slug": slug,
+            "preset": demo_meta.get("preset") or spec["preset"],
+            "contract_id": f"slide-creator/{slug}",
+            "contract_version": "1.0.0",
+            "family": spec["family"],
+            "producer_version_tested": demo_meta.get("producer_version_tested") or "unknown",
+            "contract_path": f"presets/{slug}.json",
+            "source_refs": _relative_paths(slide_creator_root, spec["reference_refs"]),
+            "demo_refs": _relative_paths(slide_creator_root, spec["demo_refs"]),
+        }
+        support_tiers = sorted((spec.get("support_tiers") or {}).keys())
+        if support_tiers:
+            preset_entry["support_tiers"] = support_tiers
+        presets.append(preset_entry)
 
     return {
         "producer": "slide-creator",
