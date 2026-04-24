@@ -31,7 +31,7 @@ import urllib.request
 import copy
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple, Protocol
+from typing import List, Dict, Any, Optional, Tuple, Protocol, Set
 
 # ─── Dependency check ─────────────────────────────────────────────────────────
 
@@ -1526,7 +1526,25 @@ def _parse_grid_columns(grid_template: str, available_width_in: Optional[float] 
     return max(len(cols), 1)
 
 
+def _has_centered_parent_column(container: Tag, css_rules: List[CSSRule], style: Dict[str, str]) -> bool:
+    """Detect centered column wrappers that naturally shrink-wrap descendant card grids."""
+    parent = getattr(container, 'parent', None)
+    if not isinstance(parent, Tag):
+        return False
+    parent_style = compute_element_style(parent, css_rules, parent.get('style', ''), style)
+    if _detect_flex_container(parent_style) and parent_style.get('flexDirection', '') == 'column':
+        if parent_style.get('alignItems', '') == 'center':
+            return True
+        if parent_style.get('textAlign', '') == 'center':
+            return True
+        if parent_style.get('justifyContent', '') == 'center':
+            return True
+    return parent_style.get('textAlign', '') == 'center'
+
+
 def _should_use_intrinsic_auto_fit_grid(
+    container: Tag,
+    css_rules: List[CSSRule],
     style: Dict[str, str],
     grid_template: str,
     *,
@@ -1544,9 +1562,24 @@ def _should_use_intrinsic_auto_fit_grid(
         style.get('maxWidth', style.get('max-width', '')),
         VIEWPORT_WIDTH_PX,
     )
-    return bool(
+    if (
         max_width_px > 0 or
         (content_width_px and content_width_px < slide_width_px * 0.7)
+    ):
+        return True
+
+    if not _has_centered_parent_column(container, css_rules, style):
+        return False
+
+    tag_children = [child for child in container.children if isinstance(child, Tag)]
+    if not tag_children or len(tag_children) > 2:
+        return False
+
+    return all(
+        has_visible_bg_or_border(
+            compute_element_style(child, css_rules, child.get('style', ''), style)
+        )
+        for child in tag_children
     )
 
 
@@ -1561,7 +1594,11 @@ def _should_stack_centered_auto_fit_cards(
     and unconstrained by explicit width, so the browser collapses the grid to a
     single intrinsic column instead of stretching into two tracks.
     """
-    if style.get('textAlign', '') != 'center':
+    centered_context = (
+        style.get('textAlign', '') == 'center' or
+        _has_centered_parent_column(container, css_rules, style)
+    )
+    if not centered_context:
         return False
     if parse_px(style.get('width', '')) > 0:
         return False
@@ -1954,6 +1991,23 @@ def _measure_inline_fragment_box_px(
                 height_px += float(border_match.group(1)) * 2
 
     return width_px, height_px
+
+
+def _should_apply_display_heading_boost(tag: str, style: Dict[str, str], text: str) -> bool:
+    """Optically compensate bold CJK display headings that render smaller in PPT."""
+    if tag not in {'h1', 'h2'} or not text or not has_cjk(text):
+        return False
+    if has_visible_bg_or_border(style):
+        return False
+    if not is_bold(style.get('fontWeight', '400')):
+        return False
+    font_stack = (style.get('fontFamily', '') or '').lower()
+    if not any(token in font_stack for token in ('inter', 'dm sans', 'clash display', 'satoshi', 'noto sans', 'system-ui')):
+        return False
+    font_px = parse_px(style.get('fontSize', '16px'))
+    if font_px < 28.0:
+        return False
+    return True
 
 
 def measure_inline_fragments_width_in(
@@ -2560,13 +2614,14 @@ def _apply_vertical_card_slot_layout(
 
     first = content_children[0]
     last = content_children[-1]
+    first_gap_after = float(first.get('_slot_gap_after', gap_after_metric) or gap_after_metric)
     last_bounds = last.get('bounds', {})
     last_target_y = max(card_h - pad_b - last_bounds.get('height', 0.0), pad_t)
     _shift_relative_element_y(last, last_target_y - last_bounds.get('y', 0.0))
 
     if len(content_children) == 2 and slot_model.get('metric_vertical_align') == 'center_remaining':
         first_bounds = first.get('bounds', {})
-        upper_limit = max(last_target_y - gap_after_metric, pad_t + first_bounds.get('height', 0.0))
+        upper_limit = max(last_target_y - first_gap_after, pad_t + first_bounds.get('height', 0.0))
         first_target_y = pad_t + max((upper_limit - pad_t - first_bounds.get('height', 0.0)) / 2.0, 0.0)
         _shift_relative_element_y(first, first_target_y - first_bounds.get('y', 0.0))
         return
@@ -2580,7 +2635,8 @@ def _apply_vertical_card_slot_layout(
         child.get('bounds', {}).get('y', 0.0) + child.get('bounds', {}).get('height', 0.0)
         for child in middle
     )
-    target_mid_bottom = max(last_target_y - gap_after_label, mid_top)
+    last_middle_gap = float(middle[-1].get('_slot_gap_after', gap_after_label) or gap_after_label)
+    target_mid_bottom = max(last_target_y - last_middle_gap, mid_top)
     middle_delta = target_mid_bottom - mid_bottom
     for child in middle:
         _shift_relative_element_y(child, middle_delta)
@@ -2590,9 +2646,95 @@ def _apply_vertical_card_slot_layout(
 
     first_bounds = first.get('bounds', {})
     middle_top = min(child.get('bounds', {}).get('y', 0.0) for child in middle)
-    upper_limit = max(middle_top - gap_after_metric, pad_t + first_bounds.get('height', 0.0))
+    upper_limit = max(middle_top - first_gap_after, pad_t + first_bounds.get('height', 0.0))
     first_target_y = pad_t + max((upper_limit - pad_t - first_bounds.get('height', 0.0)) / 2.0, 0.0)
     _shift_relative_element_y(first, first_target_y - first_bounds.get('y', 0.0))
+
+
+def _set_text_element_font_px(elem: Dict[str, Any], font_px: float) -> None:
+    """Update a text element font size consistently across styles/segments/fragments."""
+    if not elem or elem.get('type') != 'text':
+        return
+    font_px = max(font_px, 1.0)
+    font_size = f'{font_px:.2f}px'
+    elem.setdefault('styles', {})['fontSize'] = font_size
+    for fragment in elem.get('fragments', []) or []:
+        fragment['fontSize'] = font_size
+    for segment in elem.get('segments', []) or []:
+        segment['fontSize'] = font_size
+
+
+def _fit_vertical_card_metric_slot(
+    flow_children: List[Dict[str, Any]],
+    pad_t: float,
+    pad_b: float,
+    card_h: float,
+    slot_model: Dict[str, Any],
+) -> bool:
+    """Keep oversized metric tokens from dominating vertical-card components."""
+    max_ratio = float(slot_model.get('metric_max_height_ratio', 0.0) or 0.0)
+    if max_ratio <= 0.0:
+        return False
+
+    content_children = [
+        child for child in flow_children
+        if child.get('type') != 'shape' or not child.get('_is_card_bg')
+    ]
+    if not content_children:
+        return False
+
+    metric_child = next(
+        (child for child in content_children if child.get('_slot_metric') and child.get('type') == 'text'),
+        None,
+    )
+    if not metric_child:
+        return False
+
+    inner_h = max(card_h - pad_t - pad_b, 0.2)
+    target_h = inner_h * max_ratio
+    current_h = metric_child.get('bounds', {}).get('height', 0.0)
+    if current_h <= target_h + 1e-6:
+        return False
+
+    current_font_px = parse_px(metric_child.get('styles', {}).get('fontSize', '16px')) or 16.0
+    scale = max(min(target_h / max(current_h, 1e-6), 0.98), 0.70)
+    new_font_px = current_font_px * scale
+    _set_text_element_font_px(metric_child, new_font_px)
+
+    width_in = metric_child.get('bounds', {}).get('width', 0.2)
+    next_flow_item = None
+    try:
+        metric_idx = content_children.index(metric_child)
+        if metric_idx + 1 < len(content_children):
+            next_flow_item = content_children[metric_idx + 1]
+    except ValueError:
+        next_flow_item = None
+
+    _remeasure_text_for_final_width(
+        metric_child,
+        width_in,
+        next_flow_item=next_flow_item,
+        inside_card=True,
+    )
+    return True
+
+
+def _vertical_card_authored_gap_after_in(
+    current_style: Dict[str, str],
+    next_style: Optional[Dict[str, str]],
+    parent_gap_in: float,
+    fallback_gap_in: float,
+    basis_px: float,
+) -> float:
+    """Prefer authored column gap + margins before falling back to contract spacing."""
+    current_mb = _resolve_css_length_with_basis(current_style.get('marginBottom', '0px'), basis_px) / PX_PER_IN
+    next_mt = 0.0
+    if next_style:
+        next_mt = _resolve_css_length_with_basis(next_style.get('marginTop', '0px'), basis_px) / PX_PER_IN
+    authored = max(parent_gap_in + current_mb + next_mt, 0.0)
+    if authored > 1e-6:
+        return authored
+    return fallback_gap_in
 
 
 def _build_contract_vertical_card(
@@ -2621,15 +2763,24 @@ def _build_contract_vertical_card(
     gap_after_metric = float(gap_cfg.get('after_metric', 0.06) or 0.06)
     gap_after_label = float(gap_cfg.get('after_label', 0.05) or 0.05)
     min_height_in = float(slot_model.get('minimum_height_in', 0.0) or 0.0)
+    parent_gap_in = 0.0
+    if style.get('display') in {'flex', 'inline-flex'} and style.get('flexDirection', 'row') == 'column':
+        parent_gap_px = _resolve_css_length_with_basis(
+            style.get('rowGap') or style.get('gap', '0px'),
+            slide_width_px,
+        )
+        parent_gap_in = max(parent_gap_px / PX_PER_IN, 0.0)
 
     children: List[Dict[str, Any]] = []
     y_cursor = pad_t
 
-    for idx, child in enumerate(direct_children):
+    resolved_children: List[Tuple[Tag, Dict[str, str], Set[str], str]] = []
+    for child in direct_children:
         child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
+        resolved_children.append((child, child_style, _element_classes(child), get_text_content(child).strip()))
+
+    for idx, (child, child_style, child_classes, child_text) in enumerate(resolved_children):
         child_cw_px = max(content_w_in * PX_PER_IN, 1.0)
-        child_classes = _element_classes(child)
-        child_text = get_text_content(child).strip()
         metric_like = bool(
             child_classes.intersection({'ds-kpi', 'feat-stat', 'sol-icon'}) or
             (
@@ -2684,6 +2835,8 @@ def _build_contract_vertical_card(
             continue
 
         child_bounds = child_el.setdefault('bounds', {})
+        if metric_like and child_el.get('type') == 'text':
+            child_el['_slot_metric'] = True
         child_bounds['x'] = pad_l
         if child_el.get('type') == 'text':
             if metric_like:
@@ -2700,12 +2853,23 @@ def _build_contract_vertical_card(
         child_bounds['y'] = y_cursor
         children.append(child_el)
 
-        gap_after = gap_after_label
-        if metric_like or idx == 0:
-            gap_after = max(
-                gap_after_metric,
-                min(max(parse_px(child_style.get('fontSize', '16px')) * 0.12 / PX_PER_IN, 0.08), 0.18),
+        gap_after = 0.0
+        if idx + 1 < len(resolved_children):
+            fallback_gap = gap_after_label
+            if metric_like or idx == 0:
+                fallback_gap = max(
+                    gap_after_metric,
+                    min(max(parse_px(child_style.get('fontSize', '16px')) * 0.12 / PX_PER_IN, 0.08), 0.18),
+                )
+            next_style = resolved_children[idx + 1][1]
+            gap_after = _vertical_card_authored_gap_after_in(
+                child_style,
+                next_style,
+                parent_gap_in,
+                fallback_gap,
+                slide_width_px,
             )
+        child_el['_slot_gap_after'] = gap_after
         y_cursor += child_bounds.get('height', 0.0) + gap_after
 
     if not children:
@@ -2717,6 +2881,7 @@ def _build_contract_vertical_card(
     )
     card_h = max(content_bottom + pad_b, min_height_in, 0.2)
     bg_shape = _build_card_bg_shape(element, style, slide_width_px, width_in, card_h, pad_l, pad_r, pad_t, pad_b)
+    bg_shape['_component_slot_model'] = copy.deepcopy(slot_model)
     flow_children = [bg_shape] + children
     _normalize_card_group_text_metrics(flow_children, width_in)
     card_h = max(
@@ -2726,6 +2891,7 @@ def _build_contract_vertical_card(
         ),
         min_height_in,
     )
+    _fit_vertical_card_metric_slot(flow_children, pad_t, pad_b, card_h, slot_model)
     _apply_vertical_card_slot_layout(flow_children, pad_t, pad_b, card_h, slot_model)
     card_h = max(
         max(
@@ -2744,6 +2910,7 @@ def _build_contract_vertical_card(
         'children': flow_children,
         '_children_relative': True,
         '_component_contract': slot_model.get('layout', 'vertical_card'),
+        '_component_slot_model': copy.deepcopy(slot_model),
     }]
 
 
@@ -2903,6 +3070,14 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
                        exclude_elements: set = None) -> Optional[Dict]:
     """Build a text element IR with segments."""
     tag = element.name.lower()
+    raw_text = get_text_content(element).strip()
+    style = dict(style)
+    applied_display_heading_boost = False
+    if _should_apply_display_heading_boost(tag, style, raw_text):
+        base_font_px = parse_px(style.get('fontSize', '16px')) or 16.0
+        boost = 1.18 if tag == 'h1' else 1.30
+        style['fontSize'] = f'{base_font_px * boost:.2f}px'
+        applied_display_heading_boost = True
     fragments = extract_inline_fragments(element, css_rules, style, exclude_elements=exclude_elements)
     has_inline_boxes = any(f.get('kind') in INLINE_BOX_KINDS for f in fragments)
     has_grouped_inline = any(f.get('grouped') for f in fragments)
@@ -2932,15 +3107,21 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
         for child in element.children
     )
     display = style.get('display', '')
-    element_is_inline_box = (
-        tag in INLINE_TAGS and
-        has_visible_bg_or_border(style) and
-        is_leaf_text_container(element, css_rules)
-    )
-    shrink_wrap_inline = element_is_inline_box and (
+    inlineish_display = (
         'inline-block' in display or
         'inline-flex' in display or
-        display == 'flex' or
+        display == 'flex'
+    )
+    element_is_inline_box = (
+        has_visible_bg_or_border(style) and
+        is_leaf_text_container(element, css_rules) and
+        (
+            tag in INLINE_TAGS or
+            inlineish_display
+        )
+    )
+    shrink_wrap_inline = element_is_inline_box and (
+        inlineish_display or
         tag == 'span'
     )
     component_like_inline = (
@@ -3181,7 +3362,7 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
     if len(gradient_colors) == 1:
         gradient_colors = gradient_colors * 2
 
-    return {
+    text_ir = {
         'type': 'text', 'tag': element.name, 'text': text, 'segments': segments,
         'fragments': fragments,
         'gradientColors': gradient_colors[:2] if gradient_colors else None, 'textTransform': style.get('textTransform', 'none'),
@@ -3226,6 +3407,9 @@ def build_text_element(element: Tag, style: Dict[str, str], css_rules: List[CSSR
             'transform': style.get('transform', ''),
         },
     }
+    if applied_display_heading_boost:
+        _set_text_element_font_px(text_ir, parse_px(style.get('fontSize', '16px')) or 16.0)
+    return text_ir
 
 
 def _compute_table_column_widths(rows, table_w):
@@ -3908,6 +4092,16 @@ def _normalize_card_group_text_metrics(group: List[Dict[str, Any]], item_width_i
             continue
         if elem in flow_items:
             prev_anchor = elem
+
+    slot_model = bg_shape.get('_component_slot_model') or {}
+    if slot_model.get('layout') == 'vertical_card' and slot_model.get('bottom_anchor_last_slot'):
+        _apply_vertical_card_slot_layout(
+            group,
+            bg_shape.get('_css_pad_t', 0.0),
+            bg_shape.get('_css_pad_b', 0.0),
+            bg_shape.get('bounds', {}).get('height', 0.0),
+            slot_model,
+        )
 
 
 def _cjk_correct_width(has_border: bool, text: str, width_in: float, is_condensed: bool) -> float:
@@ -4854,11 +5048,14 @@ def flat_extract(
 
         # Grid or flex-row layout: wrap children in a container element
         if _is_grid_container(style) or _detect_flex_row(style):
+            grid_local_origin = local_origin or not is_slide_root
             grid_template = style.get('gridTemplateColumns', '') or style.get('grid-template-columns', '')
             intrinsic_auto_fit_grid = _should_use_intrinsic_auto_fit_grid(
+                element,
+                css_rules,
                 style,
                 grid_template,
-                local_origin=local_origin,
+                local_origin=grid_local_origin,
                 content_width_px=content_width_px,
                 slide_width_px=slide_width_px,
             )
@@ -4873,7 +5070,7 @@ def flat_extract(
                 style,
                 slide_width_px,
                 content_width_px,
-                local_origin=local_origin,
+                local_origin=grid_local_origin,
                 contract=contract,
             )
             if grid_children:
@@ -4895,7 +5092,7 @@ def flat_extract(
                         child['bounds']['x'] = max(child['bounds'].get('x', 0.0) - min_child_x, 0.0)
                     container_w = intrinsic_w
             elif (
-                local_origin and grid_children and not content_width_px and
+                grid_local_origin and grid_children and not content_width_px and
                 not preserve_metric_grid_width and
                 parse_px(style.get('width', '')) <= 0 and
                 parse_px(style.get('maxWidth', style.get('max-width', ''))) <= 0
@@ -4915,7 +5112,7 @@ def flat_extract(
             # whole component as one unit. Limiting this to only constrained
             # wrappers breaks flex-wrap rails (e.g. theme pills) because their
             # children stay at the old absolute y positions.
-            children_relative = bool(local_origin)
+            children_relative = bool(grid_local_origin)
 
             container = {
                 'type': 'container',
@@ -5394,6 +5591,8 @@ def build_grid_children(
         grid_cols = style.get('grid-template-columns', '')
 
     intrinsic_auto_fit_grid = _should_use_intrinsic_auto_fit_grid(
+        container,
+        css_rules,
         style,
         grid_cols,
         local_origin=local_origin,
@@ -7859,53 +8058,92 @@ def pre_pass_corrections(elements: List[Dict]):
 # ─── PPTX Rendering ───────────────────────────────────────────────────────────
 
 _FONT_MAP = {
-    'Clash Display': ('Calibri Light', 'Microsoft YaHei'),
-    'Satoshi':       ('Calibri',       'Microsoft YaHei'),
-    'Microsoft YaHei': ('Microsoft YaHei', 'Microsoft YaHei'),
-    '微软雅黑':          ('Microsoft YaHei', 'Microsoft YaHei'),
-    'PingFang SC':      ('Microsoft YaHei', 'Microsoft YaHei'),
-    'Noto Sans SC':     ('Microsoft YaHei', 'Microsoft YaHei'),
-    'Noto Sans CJK SC': ('Noto Sans CJK SC','Noto Sans CJK SC'),
-    'Source Han Sans':  ('Source Han Sans', 'Source Han Sans'),
-    'system-ui':        ('Microsoft YaHei', 'Microsoft YaHei'),
-    '-apple-system':    ('Microsoft YaHei', 'Microsoft YaHei'),
-    'BlinkMacSystemFont': ('Microsoft YaHei', 'Microsoft YaHei'),
+    'Inter':         ('Inter', 'Hiragino Sans GB'),
+    'DM Sans':       ('Inter', 'Hiragino Sans GB'),
+    'Clash Display': ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Satoshi':       ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Microsoft YaHei': ('Helvetica Neue', 'Hiragino Sans GB'),
+    '微软雅黑':          ('Helvetica Neue', 'Hiragino Sans GB'),
+    'PingFang SC':      ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Noto Sans SC':     ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Noto Sans CJK SC': ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Source Han Sans':  ('Helvetica Neue', 'Hiragino Sans GB'),
+    'system-ui':        ('Helvetica Neue', 'Hiragino Sans GB'),
+    '-apple-system':    ('Helvetica Neue', 'Hiragino Sans GB'),
+    'BlinkMacSystemFont': ('Helvetica Neue', 'Hiragino Sans GB'),
 }
-_DEFAULT_FONTS = ('Microsoft YaHei', 'Microsoft YaHei')
+_DEFAULT_FONTS = ('Helvetica Neue', 'Hiragino Sans GB')
+_DEFAULT_LATIN_FONTS = ('Inter', 'Inter')
 _OFFICE_SAFE_FONT_KEYS = (
-    'Microsoft YaHei',
-    '微软雅黑',
     'PingFang SC',
     'Noto Sans SC',
     'Noto Sans CJK SC',
     'Source Han Sans',
+    'Microsoft YaHei',
+    '微软雅黑',
 )
+_LATIN_SAFE_FONT_KEYS = {
+    'inter': ('Inter', 'Inter'),
+    'dm sans': ('Inter', 'Inter'),
+    'clash display': ('Helvetica Neue', 'Helvetica Neue'),
+    'satoshi': ('Helvetica Neue', 'Helvetica Neue'),
+    'arial': ('Arial', 'Arial'),
+    'helvetica': ('Helvetica Neue', 'Helvetica Neue'),
+    'helvetica neue': ('Helvetica Neue', 'Helvetica Neue'),
+    'segoe ui': ('Helvetica Neue', 'Helvetica Neue'),
+    'system-ui': ('Helvetica Neue', 'Helvetica Neue'),
+    '-apple-system': ('Helvetica Neue', 'Helvetica Neue'),
+    'blinkmacsystemfont': ('Helvetica Neue', 'Helvetica Neue'),
+    'sf pro': ('Helvetica Neue', 'Helvetica Neue'),
+    'mono': ('Menlo', 'Menlo'),
+    'menlo': ('Menlo', 'Menlo'),
+    'monaco': ('Menlo', 'Menlo'),
+    'consolas': ('Menlo', 'Menlo'),
+    'courier new': ('Courier New', 'Courier New'),
+}
 
 
-def map_font(css_font_family: str):
+def map_font(css_font_family: str, text: str = ''):
+    contains_cjk = bool(text) and has_cjk(text)
     if css_font_family:
         candidates = []
         for token in css_font_family.split(','):
             normalized = token.strip().strip('\'"')
             if normalized:
                 candidates.append(normalized)
+        latin_only = bool(text) and not contains_cjk
+        if latin_only:
+            for candidate in candidates:
+                candidate_lc = candidate.lower()
+                if candidate_lc in _LATIN_SAFE_FONT_KEYS:
+                    return _LATIN_SAFE_FONT_KEYS[candidate_lc]
+            for candidate in candidates:
+                candidate_lc = candidate.lower()
+                for css_name, fonts in _LATIN_SAFE_FONT_KEYS.items():
+                    if css_name in candidate_lc:
+                        return fonts
         # Prefer stable Office-safe CJK fonts when a CSS stack mixes platform
         # fonts (e.g. PingFang / system-ui) with a later PPT-friendly fallback.
         for preferred in _OFFICE_SAFE_FONT_KEYS:
             preferred_lc = preferred.lower()
             if any(candidate.lower() == preferred_lc for candidate in candidates):
-                return _FONT_MAP[preferred]
+                fonts = _FONT_MAP[preferred]
+                return (fonts[1], fonts[1]) if contains_cjk else fonts
         for candidate in candidates:
             candidate_lc = candidate.lower()
             for css_name, fonts in _FONT_MAP.items():
                 if candidate_lc == css_name.lower():
-                    return fonts
+                    return (fonts[1], fonts[1]) if contains_cjk else fonts
         for candidate in candidates:
             candidate_lc = candidate.lower()
             for css_name, fonts in _FONT_MAP.items():
                 if css_name.lower() in candidate_lc:
-                    return fonts
-    return _DEFAULT_FONTS
+                    return (fonts[1], fonts[1]) if contains_cjk else fonts
+        if latin_only:
+            return _DEFAULT_LATIN_FONTS
+    if contains_cjk:
+        return (_DEFAULT_FONTS[1], _DEFAULT_FONTS[1])
+    return _DEFAULT_LATIN_FONTS if text and not contains_cjk else _DEFAULT_FONTS
 
 
 def set_run_fonts(run, latin_font, ea_font):
@@ -8146,7 +8384,7 @@ def apply_run(run, text, color_str, font_size_pt, font_weight,
         _t_elem = run._r.find('.//a:t', _nsmap)
         if _t_elem is not None:
             _t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-    latin_font, ea_font = map_font(font_family)
+    latin_font, ea_font = map_font(font_family, text=text)
     set_run_fonts(run, latin_font, ea_font)
     if font_size_pt:
         run.font.size = Pt(font_size_pt)
@@ -8456,6 +8694,8 @@ def export_shape_background(slide, elem, slide_bg=(255, 255, 255)):
         run.text = pill_text
         font_size_pt = px_to_pt(s.get('fontSize', '14px'))
         run.font.size = Pt(font_size_pt)
+        latin_font, ea_font = map_font(s.get('fontFamily', ''), text=pill_text)
+        set_run_fonts(run, latin_font, ea_font)
         pill_color_hex = elem.get('pill_color', '')
         if pill_color_hex:
             # Resolve CSS variables if needed

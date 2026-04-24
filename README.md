@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.2.0`
+Current release: `v1.3.0`
 
 ## 中文说明
 
@@ -33,6 +33,8 @@ Current release: `v1.2.0`
   - `total actionable = 2`
 
 还没有达到“每页都 >= 9.5”的最终目标，但这条分支已经明显从“按页打补丁”转成了“增强 exporter 通用能力”。
+
+最近新增了一条 `slide-creator` contract-driven 路径，正在把 `data-story / enterprise-dark` 这类新风格从“启发式近似”推进到“基于 preset contract 的组件导出”。当前最后一份完整跑完的 `data-story` 视觉对比结果是 `8.86/10`，说明这条路径已经有明显进展，但还处于持续优化阶段。
 
 ### 主要能力
 
@@ -105,14 +107,14 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.2.0 更新重点
+### v1.3.0 更新重点
 
-- README 升级为适合 GitHub 首页的中英双语说明
-- 仓库发布面收敛：本地 `docs/`、根目录历史输出产物不再作为仓库内容
-- `presentation_rows` 在 generic table renderer 中支持更合理的列宽分配
-- shortcut-heavy 首列现在会获得额外 runway，减少快捷键导航行被挤压
-- centered closing command row 的尾部链接色已与参考 deck 对齐
-- divider 的 auto-margin 定位回到稳定居中逻辑
+- 新增 `slide-creator` contract sync pipeline，并把可消费的 preset contract vendored 到仓库内
+- 运行时支持更稳定的 producer detection / export hints / contract loading
+- `data-story` 路径开始落地 contract-driven 组件求解，覆盖 `metric_card`、centered wrapper、pill、small auto-fit KPI grid 等关键结构
+- CJK 主字体链改成稳定的 Office-safe 写法，中文 run 不再错误走 Latin 字体
+- 回归测试继续扩展到 `data-story / enterprise-dark / blue-sky / handwritten corpus`
+- GitHub 发布面继续保持收敛：本地 `docs/`、`memory/`、`demo/` 工作资产不作为仓库交付内容
 
 ### 已知边界
 

@@ -365,6 +365,9 @@ def test_sync_slide_creator_contracts_builds_data_story_contract():
     assert contract['component_slot_models']['metric_card']['slots'] == ['metric', 'label', 'trend'], contract
     assert contract['component_slot_models']['metric_card']['metric_single_line'] is True, contract
     assert contract['component_slot_models']['style_card']['stretch_first_slot'] is True, contract
+    assert contract['component_slot_models']['style_card']['bottom_anchor_last_slot'] is False, contract
+    assert contract['component_slot_models']['solution_card']['bottom_anchor_last_slot'] is False, contract
+    assert contract['component_slot_models']['feature_card']['bottom_anchor_last_slot'] is False, contract
     assert '.ds-kpi-card' in contract['component_selectors']['metric_card'], contract
     print("  PASS: sync helper builds data-story contract")
 
@@ -742,6 +745,37 @@ def test_data_story_feature_cards_stack_text_content_vertically():
     print("  PASS: data-story feature cards stack text content vertically")
 
 
+def test_data_story_cta_kpi_grid_prefers_centered_single_column_stack():
+    """CTA KPI cards should shrink-wrap into a centered single-column stack."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story CTA KPI stack (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide8 = slides[7]
+    containers = _collect_elements_by_type(slide8['elements'], 'container')
+    kpi_grid = next(
+        (
+            elem for elem in containers
+            if len([child for child in elem.get('children', []) if child.get('type') == 'container']) == 2
+            and elem.get('bounds', {}).get('y', 0.0) > 3.0
+        ),
+        None,
+    )
+    assert kpi_grid is not None, containers
+    cards = [child for child in kpi_grid.get('children', []) if child.get('type') == 'container']
+    widths = [round(card['bounds']['width'], 3) for card in cards]
+    xs = [round(card['bounds']['x'], 3) for card in cards]
+    ys = [round(card['bounds']['y'], 3) for card in cards]
+    assert len(cards) == 2, kpi_grid
+    assert max(widths) - min(widths) < 0.05, widths
+    assert min(widths) > 1.4, widths
+    assert max(xs) - min(xs) < 0.05, xs
+    assert ys == sorted(ys), ys
+    print("  PASS: data-story CTA KPI grid prefers centered single-column stack")
+
+
 def test_data_story_nested_card_groups_keep_grid_slot_width():
     """Nested background-card containers inside grids should occupy their laid-out track width."""
     html_path = Path('demo/data-story-zh.html')
@@ -879,6 +913,85 @@ def test_data_story_feature_cards_use_contract_min_height():
     print("  PASS: data-story feature cards keep contract minimum height")
 
 
+def test_data_story_style_cards_preserve_authored_preview_body_trend_spacing():
+    """Style cards should keep authored swatch/title/body/trend spacing instead of KPI-style bottom anchoring."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story style card authored spacing (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide3 = slides[2]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide3['elements'])
+    slide3['_slide_index'] = 2
+    layout_slide_elements(slide3['elements'], 13.33, 810 / 108, slide3['slideStyle'], slide3)
+
+    style_grid = next(elem for elem in slide3['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in style_grid.get('children', []) if child.get('type') == 'container')
+    preview = next(child for child in first_card.get('children', []) if child.get('type') == 'container')
+    text_children = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    title, body, trend = text_children
+    preview_bottom = preview['bounds']['y'] + preview['bounds']['height']
+    gap_preview_title = title['bounds']['y'] - preview_bottom
+    gap_title_body = body['bounds']['y'] - (title['bounds']['y'] + title['bounds']['height'])
+    gap_body_trend = trend['bounds']['y'] - (body['bounds']['y'] + body['bounds']['height'])
+    assert 0.10 <= gap_preview_title <= 0.16, (preview['bounds'], title['bounds'])
+    assert 0.03 <= gap_title_body <= 0.06, (title['bounds'], body['bounds'])
+    assert 0.07 <= gap_body_trend <= 0.11, (body['bounds'], trend['bounds'])
+    print("  PASS: data-story style cards keep authored preview/body/trend spacing")
+
+
+def test_data_story_solution_cards_preserve_compact_icon_title_body_flow():
+    """Solution cards should keep compact authored flow instead of pushing title/body to the bottom."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story solution card compact flow (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide4 = slides[3]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide4['elements'])
+    slide4['_slide_index'] = 3
+    layout_slide_elements(slide4['elements'], 13.33, 810 / 108, slide4['slideStyle'], slide4)
+
+    solution_grid = next(elem for elem in slide4['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in solution_grid.get('children', []) if child.get('type') == 'container')
+    text_children = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    icon, title, body = text_children
+    gap_icon_title = title['bounds']['y'] - (icon['bounds']['y'] + icon['bounds']['height'])
+    gap_title_body = body['bounds']['y'] - (title['bounds']['y'] + title['bounds']['height'])
+    assert 0.04 <= gap_icon_title <= 0.14, (icon['bounds'], title['bounds'])
+    assert 0.04 <= gap_title_body <= 0.14, (title['bounds'], body['bounds'])
+    print("  PASS: data-story solution cards keep compact icon/title/body flow")
+
+
+def test_data_story_feature_cards_preserve_compact_metric_title_body_flow():
+    """Feature cards should keep authored 4px rhythm instead of large KPI-like voids."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature card compact flow (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide6['elements'])
+    slide6['_slide_index'] = 5
+    layout_slide_elements(slide6['elements'], 13.33, 810 / 108, slide6['slideStyle'], slide6)
+
+    feat_grid = next(elem for elem in slide6['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in feat_grid.get('children', []) if child.get('type') == 'container')
+    text_children = [child for child in first_card.get('children', []) if child.get('type') == 'text']
+    metric, title, body = text_children
+    gap_metric_title = title['bounds']['y'] - (metric['bounds']['y'] + metric['bounds']['height'])
+    gap_title_body = body['bounds']['y'] - (title['bounds']['y'] + title['bounds']['height'])
+    assert 0.02 <= gap_metric_title <= 0.08, (metric['bounds'], title['bounds'])
+    assert 0.02 <= gap_title_body <= 0.08, (title['bounds'], body['bounds'])
+    print("  PASS: data-story feature cards keep compact metric/title/body flow")
+
+
 def test_data_story_metric_cards_keep_large_numbers_single_line():
     """Problem KPI cards should keep short metric tokens on a single line."""
     html_path = Path('demo/data-story-zh.html')
@@ -897,6 +1010,57 @@ def test_data_story_metric_cards_keep_large_numbers_single_line():
     assert metric.get('forceSingleLine'), metric
     assert metric.get('bounds', {}).get('height', 0.0) < 1.05, metric.get('bounds')
     print("  PASS: data-story KPI cards keep metric tokens single-line")
+
+
+def test_data_story_metric_cards_limit_metric_share_of_card_height():
+    """KPI cards should keep the metric token from consuming most of the card height."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story metric card metric ratio (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide2 = slides[1]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide2['elements'])
+    slide2['_slide_index'] = 1
+    layout_slide_elements(slide2['elements'], 13.33, 810 / 108, slide2['slideStyle'], slide2)
+
+    _, left_rail, _ = _find_data_story_split_rails(slide2)
+    first_card = next(
+        child for child in left_rail.get('children', [])
+        if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+    )
+    bg = next(child for child in first_card['children'] if child.get('_is_card_bg'))
+    metric = next(child for child in first_card['children'] if child.get('type') == 'text' and child.get('_slot_metric'))
+    inner_h = bg['bounds']['height'] - bg.get('_css_pad_t', 0.0) - bg.get('_css_pad_b', 0.0)
+    assert inner_h > 0.1, first_card['bounds']
+    assert metric['bounds']['height'] <= inner_h * 0.81, (metric['bounds'], first_card['bounds'])
+    print("  PASS: data-story metric cards limit metric share of card height")
+
+
+def test_data_story_feature_cards_limit_metric_share_of_card_height():
+    """Feature cards should keep large stat tokens visually subordinate to the card body."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature card metric ratio (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    pre_pass_corrections = getattr(export_sandbox, 'pre_pass_corrections')
+    pre_pass_corrections(slide6['elements'])
+    slide6['_slide_index'] = 5
+    layout_slide_elements(slide6['elements'], 13.33, 810 / 108, slide6['slideStyle'], slide6)
+
+    feat_grid = next(elem for elem in slide6['elements'] if elem.get('type') == 'container')
+    first_card = next(child for child in feat_grid.get('children', []) if child.get('type') == 'container')
+    bg = next(child for child in first_card['children'] if child.get('_is_card_bg'))
+    metric = next(child for child in first_card['children'] if child.get('type') == 'text' and child.get('_slot_metric'))
+    inner_h = bg['bounds']['height'] - bg.get('_css_pad_t', 0.0) - bg.get('_css_pad_b', 0.0)
+    assert inner_h > 0.1, first_card['bounds']
+    assert metric['bounds']['height'] <= inner_h * 0.59, (metric['bounds'], first_card['bounds'])
+    print("  PASS: data-story feature cards limit metric share of card height")
 
 
 def test_data_story_metric_grids_preserve_authored_row_width_when_not_centered():
@@ -983,6 +1147,34 @@ def test_data_story_relative_grids_normalize_local_origin():
     )
     assert first_card['bounds']['x'] < 0.1, first_card['bounds']
     print("  PASS: relative grid wrappers normalize local origin")
+
+
+def test_data_story_feature_grid_children_stay_within_local_container_width():
+    """Top-level feature grids should localize child card coordinates instead of baking slide margins twice."""
+    html_path = Path('demo/data-story-zh.html')
+    if not html_path.exists():
+        print("  SKIP: data-story feature grid local origin (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440)
+    slide6 = slides[5]
+    feat_grid = next(
+        elem for elem in slide6['elements']
+        if elem.get('type') == 'container' and len([
+            child for child in elem.get('children', [])
+            if child.get('type') == 'container' and child.get('_component_contract') == 'vertical_card'
+        ]) >= 4
+    )
+    cards = [child for child in feat_grid.get('children', []) if child.get('type') == 'container']
+    assert cards, feat_grid
+    first_card = min(cards, key=lambda child: child.get('bounds', {}).get('x', 0.0))
+    last_card = max(cards, key=lambda child: child.get('bounds', {}).get('x', 0.0))
+    assert first_card['bounds']['x'] < 0.1, first_card['bounds']
+    assert last_card['bounds']['x'] + last_card['bounds']['width'] <= feat_grid['bounds']['width'] + 0.02, (
+        feat_grid['bounds'],
+        last_card['bounds'],
+    )
+    print("  PASS: data-story feature grid children stay within local container width")
 
 
 def test_export_freeform_open_path_uses_connector_segments():
@@ -1475,10 +1667,10 @@ def test_centered_explicit_break_heading_gets_wrap_guard_width():
 
 
 def test_map_font_prefers_office_safe_font_in_mixed_cjk_stack():
-    """Mixed platform/system CJK stacks should resolve to a stable PPT-safe fallback."""
+    """Mixed platform/system CJK stacks should resolve to an installed browser-faithful fallback."""
     css_stack = "'PingFang SC', 'Microsoft YaHei', 'DM Sans', system-ui, -apple-system, sans-serif"
-    assert map_font(css_stack) == ('Microsoft YaHei', 'Microsoft YaHei')
-    print("  PASS: mixed CJK font stack prefers PPT-safe office font")
+    assert map_font(css_stack, text='中文标题') == ('Hiragino Sans GB', 'Hiragino Sans GB')
+    print("  PASS: mixed CJK font stack prefers installed browser-faithful font pair")
 
 
 def test_pill_text_included_in_parent():
@@ -2447,6 +2639,50 @@ def test_build_text_element_grouped_inline_badge_keeps_single_line_height():
     print("  PASS: grouped inline badge keeps capsule-like single-line height")
 
 
+def test_build_text_element_block_cta_pill_uses_component_layout():
+    """Block tags with inline-block pill styling should still use pill component sizing."""
+    html = '''
+    <div style="display:inline-block;padding:12px 32px;border-radius:8px;
+                background:#3b82f6;color:#ffffff;font-weight:700;
+                font-size:clamp(1rem, 2vw, 1.5rem);text-align:center;">
+      /slide-creator
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    pill = soup.find('div')
+    style = compute_element_style(pill, [], pill.get('style', ''))
+    text_ir = build_text_element(pill, style, [], 1440, 900)
+
+    assert text_ir is not None, "CTA pill should build into a text element"
+    assert text_ir.get('forceSingleLine'), text_ir
+    assert text_ir.get('preferContentWidth'), text_ir
+    assert text_ir['bounds']['height'] >= 0.30, text_ir['bounds']
+    print("  PASS: block CTA pill uses component layout")
+
+
+def test_build_text_element_boosts_cjk_display_heading_optically():
+    """Bold CJK h1/h2 display headings should get a small optical size boost for PPT output."""
+    html = '''
+    <h2 style="font-family:'Inter', 'Noto Sans SC', sans-serif;
+               font-size:clamp(1.25rem, 3.5vw, 2.5rem);
+               font-weight:700;line-height:1.1;letter-spacing:-0.02em;">
+      四个核心能力，支撑完整演示链路
+    </h2>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    heading = soup.find('h2')
+    style = compute_element_style(heading, [], heading.get('style', ''))
+    text_ir = build_text_element(heading, style, [], 1440, 900)
+
+    assert text_ir is not None, "Display heading should build into a text element"
+    boosted_font_px = parse_px(text_ir['styles']['fontSize'])
+    assert boosted_font_px >= 43.0, boosted_font_px
+    assert all(parse_px(seg.get('fontSize', '0px')) >= 43.0 for seg in text_ir.get('segments', [])), text_ir.get('segments')
+    assert all(parse_px(frag.get('fontSize', '0px')) >= 43.0 for frag in text_ir.get('fragments', [])), text_ir.get('fragments')
+    assert text_ir['bounds']['height'] > 0.45, text_ir['bounds']
+    print("  PASS: CJK display heading gets optical size boost")
+
+
 def test_build_grid_children_flex_row_preserves_component_width_and_pairing():
     """Flex-row slotting should respect component width and keep bg/text paired."""
     html = '''
@@ -2511,27 +2747,39 @@ def test_build_grid_children_flex_wrap_centers_rows_without_overflow():
 
 
 def test_map_font_prefers_stable_ppt_font_over_platform_stack_order():
-    """Platform-first CSS stacks should still resolve to a stable PPT-safe CJK font."""
+    """Platform-first CSS stacks should still resolve to an installed CJK-capable font pair."""
     map_font = _require_symbol('map_font')
     if map_font is None:
         return
 
-    latin_font, ea_font = map_font("'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif")
-    assert latin_font == 'Microsoft YaHei', (latin_font, ea_font)
-    assert ea_font == 'Microsoft YaHei', (latin_font, ea_font)
-    print("  PASS: mixed platform stack resolves to stable PPT-safe font")
+    latin_font, ea_font = map_font("'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif", text='中文标题')
+    assert latin_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    assert ea_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    print("  PASS: mixed platform stack resolves to installed CJK-capable font pair")
 
 
 def test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font():
-    """Platform-only CJK stacks should still resolve to a PPT-safe fallback."""
+    """Platform-only CJK stacks should still resolve to an installed CJK-capable fallback."""
     map_font = _require_symbol('map_font')
     if map_font is None:
         return
 
-    latin_font, ea_font = map_font('"PingFang SC", "Noto Sans SC", "Segoe UI", system-ui, sans-serif')
-    assert latin_font == 'Microsoft YaHei', (latin_font, ea_font)
-    assert ea_font == 'Microsoft YaHei', (latin_font, ea_font)
-    print("  PASS: platform-only CJK stack falls back to office-safe font")
+    latin_font, ea_font = map_font('"PingFang SC", "Noto Sans SC", "Segoe UI", system-ui, sans-serif', text='演示文稿')
+    assert latin_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    assert ea_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    print("  PASS: platform-only CJK stack falls back to installed CJK-capable font")
+
+
+def test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack():
+    """Pure Latin pill labels should prefer an installed Latin font over CJK fallback fonts."""
+    map_font = _require_symbol('map_font')
+    if map_font is None:
+        return
+
+    latin_font, ea_font = map_font("'Inter', 'Noto Sans SC', system-ui, sans-serif", text='slide-creator')
+    assert latin_font == 'Inter', (latin_font, ea_font)
+    assert ea_font == 'Inter', (latin_font, ea_font)
+    print("  PASS: pure Latin labels prefer installed Latin font in mixed stack")
 
 
 def test_build_table_element_plain_td_defaults_to_text_primary():
@@ -3614,15 +3862,20 @@ def run_tests():
     test_flat_extract_content_svg_keeps_polyline_and_dots()
     test_data_story_problem_split_keeps_svg_chart_container()
     test_data_story_feature_cards_stack_text_content_vertically()
+    test_data_story_cta_kpi_grid_prefers_centered_single_column_stack()
     test_data_story_nested_card_groups_keep_grid_slot_width()
     test_data_story_install_rows_keep_horizontal_rails()
     test_data_story_centered_column_wrapper_preserves_max_width_and_children()
     test_data_story_centered_wrapper_keeps_paired_pills_overlaid()
     test_data_story_feature_cards_use_contract_min_height()
+    test_data_story_style_cards_preserve_authored_preview_body_trend_spacing()
+    test_data_story_solution_cards_preserve_compact_icon_title_body_flow()
+    test_data_story_feature_cards_preserve_compact_metric_title_body_flow()
     test_data_story_metric_cards_keep_large_numbers_single_line()
     test_data_story_metric_grids_preserve_authored_row_width_when_not_centered()
     test_data_story_left_aligned_slides_do_not_center_narrow_titles()
     test_data_story_relative_grids_normalize_local_origin()
+    test_data_story_feature_grid_children_stay_within_local_container_width()
     test_export_freeform_open_path_uses_connector_segments()
     test_data_story_style_cards_use_contract_solver_and_keep_preview_slot()
     test_slide_anchored_text_preserves_bottom_right_position()
@@ -3694,10 +3947,13 @@ def run_tests():
     test_gradient_text_hex_colors_resolve_and_keep_stops()
     test_build_text_element_inline_flex_pill_shrink_wraps_single_line()
     test_build_text_element_grouped_inline_badge_keeps_single_line_height()
+    test_build_text_element_block_cta_pill_uses_component_layout()
+    test_build_text_element_boosts_cjk_display_heading_optically()
     test_build_grid_children_flex_row_preserves_component_width_and_pairing()
     test_build_grid_children_flex_wrap_centers_rows_without_overflow()
     test_map_font_prefers_stable_ppt_font_over_platform_stack_order()
     test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font()
+    test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack()
     test_build_table_element_plain_td_defaults_to_text_primary()
     test_flat_extract_mixed_inline_code_uses_inline_overlays()
     test_flat_extract_inline_code_in_prose_does_not_emit_detached_code_bg()

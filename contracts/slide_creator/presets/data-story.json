@@ -136,57 +136,63 @@
         "label",
         "trend"
       ],
-      "minimum_height_in": 1.22,
+      "minimum_height_in": 1.1,
       "gaps": {
-        "after_metric": 0.08,
-        "after_label": 0.06
+        "after_metric": 0.05,
+        "after_label": 0.05
       },
       "metric_single_line": true,
       "bottom_anchor_last_slot": true,
-      "metric_vertical_align": "center_remaining"
+      "metric_vertical_align": "center_remaining",
+      "metric_max_height_ratio": 0.80
     },
-    "style_card": {
-      "layout": "vertical_card",
-      "slots": [
-        "preview",
-        "title",
-        "body",
-        "trend"
-      ],
-      "minimum_height_in": 1.28,
-      "gaps": {
-        "after_metric": 0.1,
-        "after_label": 0.06
-      },
-      "stretch_first_slot": true
+  "style_card": {
+    "layout": "vertical_card",
+    "slots": [
+      "preview",
+      "title",
+      "body",
+      "trend"
+    ],
+    "minimum_height_in": 1.28,
+    "gaps": {
+      "after_metric": 0.1,
+      "after_label": 0.06
     },
-    "solution_card": {
-      "layout": "vertical_card",
-      "slots": [
-        "icon",
+    "stretch_first_slot": true,
+    "bottom_anchor_last_slot": false
+  },
+  "solution_card": {
+    "layout": "vertical_card",
+    "slots": [
+      "icon",
         "title",
         "body"
       ],
-      "minimum_height_in": 1.02,
-      "gaps": {
-        "after_metric": 0.08,
-        "after_label": 0.06
-      }
+    "minimum_height_in": 1.02,
+    "gaps": {
+      "after_metric": 0.08,
+      "after_label": 0.06
     },
-    "feature_card": {
-      "layout": "vertical_card",
-      "slots": [
-        "metric",
+    "bottom_anchor_last_slot": false
+  },
+  "feature_card": {
+    "layout": "vertical_card",
+    "slots": [
+      "metric",
         "title",
         "body"
       ],
       "minimum_height_in": 1.06,
-      "gaps": {
-        "after_metric": 0.1,
-        "after_label": 0.06
-      },
-      "metric_single_line": true
+    "gaps": {
+      "after_metric": 0.1,
+      "after_label": 0.06
     },
+    "metric_single_line": true,
+    "bottom_anchor_last_slot": false,
+    "metric_vertical_align": "center_remaining",
+    "metric_max_height_ratio": 0.58
+  },
     "install_row": {
       "layout": "split_rail",
       "slots": [

@@ -1,5 +1,63 @@
 # Release Notes
 
+## v1.3.0 - 2026-04-24
+
+This release turns the earlier `slide-creator` contract discussion into shipped repository infrastructure: sync script, vendored preset contracts, runtime contract loading, and the first contract-driven geometry tuning path for newer presets such as `data-story`.
+
+本次版本把之前停留在设计阶段的 `slide-creator` contract 方案正式落地成仓库内基础设施：同步脚本、vendored preset contracts、运行时 contract 读取，以及面向 `data-story` 这类新 preset 的第一批 contract-driven 几何调优路径。
+
+### Highlights
+
+- Version bump to `v1.3.0`
+- Added `scripts/sync-slide-creator-contracts.py`
+- Added and expanded vendored preset contracts under `contracts/slide_creator/`
+- Export runtime now consumes:
+  - producer detection
+  - export hints validation
+  - preset contract loading
+  - contract-backed tuning for newer `slide-creator` decks
+- `data-story` path improved materially through:
+  - contract-driven `metric_card` rebalance
+  - centered wrapper and paired pill fixes
+  - CJK-safe primary font mapping in PPT text runs
+- Regression coverage expanded again for:
+  - `data-story`
+  - `enterprise-dark`
+  - contract sync behavior
+  - CJK font mapping and local-grid guards
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 scripts/test-export.py
+```
+
+Result:
+
+- `All tests passed!`
+
+Additional current state snapshot:
+
+- Trusted completed visual compare for `demo/data-story-zh.html`: `8.86/10`
+- Structured self-check on latest exported `demo/data-story-output.pptx`:
+  - `overflow = 5`
+  - `overlap = 0`
+  - `element gaps = 0`
+  - `card containment = 0`
+  - `total actionable = 5`
+
+### Known Gaps
+
+This release materially improves preset-aware export quality, but it still does not meet the final target of every slide scoring `>= 9.5`.
+
+Current concentration areas:
+
+- `data-story` Slide 6 feature-grid final writeout geometry
+- residual component-level optical differences on `data-story` Slides 2 / 4 / 6 / 7
+- visual compare pipeline still occasionally stalls before writing a fresh `summary.json`
+
 ## v1.2.0 - 2026-04-22
 
 This release packages the current generalized exporter baseline, updates the GitHub-facing docs, and cleans up the repository surface so local working assets stop leaking into the published repo.

@@ -236,11 +236,12 @@ PRESET_SPECS: Dict[str, Dict[str, Any]] = {
             "metric_card": {
                 "layout": "vertical_card",
                 "slots": ["metric", "label", "trend"],
-                "minimum_height_in": 1.22,
-                "gaps": {"after_metric": 0.08, "after_label": 0.06},
+                "minimum_height_in": 1.10,
+                "gaps": {"after_metric": 0.05, "after_label": 0.05},
                 "metric_single_line": True,
                 "bottom_anchor_last_slot": True,
                 "metric_vertical_align": "center_remaining",
+                "metric_max_height_ratio": 0.80,
             },
             "style_card": {
                 "layout": "vertical_card",
@@ -248,12 +249,14 @@ PRESET_SPECS: Dict[str, Dict[str, Any]] = {
                 "minimum_height_in": 1.28,
                 "gaps": {"after_metric": 0.10, "after_label": 0.06},
                 "stretch_first_slot": True,
+                "bottom_anchor_last_slot": False,
             },
             "solution_card": {
                 "layout": "vertical_card",
                 "slots": ["icon", "title", "body"],
                 "minimum_height_in": 1.02,
                 "gaps": {"after_metric": 0.08, "after_label": 0.06},
+                "bottom_anchor_last_slot": False,
             },
             "feature_card": {
                 "layout": "vertical_card",
@@ -261,6 +264,9 @@ PRESET_SPECS: Dict[str, Dict[str, Any]] = {
                 "minimum_height_in": 1.06,
                 "gaps": {"after_metric": 0.10, "after_label": 0.06},
                 "metric_single_line": True,
+                "bottom_anchor_last_slot": False,
+                "metric_vertical_align": "center_remaining",
+                "metric_max_height_ratio": 0.58,
             },
             "install_row": {
                 "layout": "split_rail",
