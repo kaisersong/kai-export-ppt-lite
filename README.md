@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.5.0`
+Current release: `v1.5.1`
 
 ## 中文说明
 
@@ -106,13 +106,13 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 可选参数：
 
 ```bash
-python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--with-chrome]
+python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 900] [--with-chrome]
 ```
 
 - `--width`
   幻灯片宽度，默认 `1440`
 - `--height`
-  幻灯片高度，默认 `810`
+  幻灯片高度，默认 `900`
 - `--with-chrome`
   额外添加 exporter 提供的页码和导航点
 
@@ -125,27 +125,24 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.5.0 更新重点
+### v1.5.1 更新重点
 
-- `Swiss Modern` vendored contract 从 metadata shell 扩到可执行契约：
-  - `support_tiers`
-  - `layout_contracts`
-  - `signature_elements`
-  - typography / line-break contract
-- runtime 现在真正消费 `Swiss Modern` 组件语义：
-  - `title_grid`
-  - `column_content`
-  - `stat_block`
-  - `pull_quote`
-- 文字 fidelity 继续收口到文件级行为：
-  - 宽列正文不再被误判成 `preferNoWrapFit`
-  - 单行 contract title 在测量已足够时保持 `no-wrap`
-  - P3 / P5 已直接通过 roundtrip PPTX XML 确认
-- 回归测试继续扩展，覆盖：
-  - Swiss contract sync
-  - compatible wrapper unwrap
-  - wide multiline prose wrap
-  - single-line title no-wrap guard
+- skill/runtime 执行面收口到“主导出器单文件也能自适应运行”：
+  - 缺失 `__file__` 时自动探测 repo/contracts 根路径
+  - vendored `contracts/` 缺失时自动降级，不阻断基础导出
+  - 依赖未预装时先尝试 runtime bootstrap，再给出最小失败信息
+- 新增可选 bootstrap：
+  - `scripts/run-skill-export.py`
+  - `requirements.txt`
+  - `SKILL.md` 的 hosted sandbox 调用协议更新
+- 修复两条真实回归：
+  - Enterprise Dark split 页右栏 stack 测试定位错误
+  - Chinese Chan 结尾页中等字号标题不应被误导出成 `wrap="none"`
+- 回归测试补强并重新跑完整套：
+  - `single-line contract title stays no-wrap`
+  - `medium contract title keeps wrap square`
+  - `Chinese Chan` roundtrip wrap fidelity
+  - `scripts/test-export.py` 全量通过
 
 ### 已知边界
 
@@ -248,13 +245,13 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 Optional flags:
 
 ```bash
-python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 810] [--with-chrome]
+python3 scripts/export-sandbox-pptx.py <file.html> [demo/output.pptx] [--width 1440] [--height 900] [--with-chrome]
 ```
 
 - `--width`
   Slide width in pixels. Default: `1440`
 - `--height`
-  Slide height in pixels. Default: `810`
+  Slide height in pixels. Default: `900`
 - `--with-chrome`
   Add exporter-provided page counter and nav dots
 
@@ -267,23 +264,20 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.5.0 Highlights
+### v1.5.1 Highlights
 
-- Expanded the vendored `Swiss Modern` preset contract into an executable runtime contract:
-  - `support_tiers`
-  - `layout_contracts`
-  - `signature_elements`
-  - typography and line-break rules
-- Export runtime now consumes Swiss component semantics for:
-  - `title_grid`
-  - `column_content`
-  - `stat_block`
-  - `pull_quote`
-- Text fidelity tightened again at file-behavior level:
-  - wide editorial prose no longer falls into accidental no-wrap fit
-  - single-line contract titles stay no-wrap when browser-width measurement already fits
-  - P3 / P5 wrap behavior is now regression-checked from roundtrip PPTX XML
-- Regression coverage expanded for Swiss contract sync, wrapper unwrap, multiline prose wrap, and single-line title guards
+- Hardened the skill/runtime execution boundary around the single-file exporter:
+  - no hard dependency on `__file__`
+  - graceful fallback when vendored `contracts/` are unavailable
+  - runtime dependency bootstrap before hard failure
+- Added optional hosted-sandbox bootstrap surfaces:
+  - `scripts/run-skill-export.py`
+  - `requirements.txt`
+  - updated `SKILL.md` execution guidance
+- Fixed two real regressions:
+  - Enterprise Dark split-right-rail test selection
+  - Chinese Chan closing-title wrap mode regressing to `wrap="none"`
+- Expanded regression coverage and reran the full suite successfully with `python3 scripts/test-export.py`
 
 ### Known Gaps
 

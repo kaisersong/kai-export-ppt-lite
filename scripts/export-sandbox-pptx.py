@@ -29,13 +29,14 @@ import base64
 import json
 import urllib.request
 import copy
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Protocol, Set
 
 # ─── Dependency check ─────────────────────────────────────────────────────────
 
-def check_deps():
+def _detect_missing_deps() -> List[str]:
     missing = []
     try:
         from bs4 import BeautifulSoup, NavigableString, Tag
@@ -45,10 +46,47 @@ def check_deps():
         from pptx import Presentation
     except ImportError:
         missing.append("python-pptx")
-    if missing:
-        print(f"Missing dependencies. Install with:")
-        print(f"  pip install {' '.join(missing)}")
-        sys.exit(1)
+    try:
+        from lxml import etree as _etree
+    except ImportError:
+        missing.append("lxml")
+    try:
+        from PIL import Image
+    except ImportError:
+        missing.append("Pillow")
+    return missing
+
+
+def _attempt_install_missing_deps(missing: List[str]) -> bool:
+    if not missing:
+        return True
+    if os.environ.get("KAI_EXPORT_PPT_LITE_AUTO_INSTALL", "1").lower() in {"0", "false", "no"}:
+        return False
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", *missing],
+            check=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def check_deps():
+    missing = _detect_missing_deps()
+    if not missing:
+        return
+    print(f"Missing dependencies detected: {', '.join(missing)}", file=sys.stderr)
+    print("Attempting runtime install via pip...", file=sys.stderr)
+    if _attempt_install_missing_deps(missing):
+        missing = _detect_missing_deps()
+        if not missing:
+            return
+    print("Dependency bootstrap failed.", file=sys.stderr)
+    print(f"Install manually with: {sys.executable} -m pip install {' '.join(missing)}", file=sys.stderr)
+    sys.exit(1)
 
 check_deps()
 
@@ -583,7 +621,82 @@ def px_to_pt(px_value: str) -> float:
 # Viewport dimensions for resolving CSS clamp() expressions and media queries.
 VIEWPORT_WIDTH_PX = 1440.0
 VIEWPORT_HEIGHT_PX = 900.0
-REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _candidate_repo_roots(
+    script_file: Optional[str] = None,
+    cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> List[Path]:
+    """Yield plausible repo roots for inline-executed and file-based runtimes."""
+    env = env or os.environ
+    candidates: List[Path] = []
+
+    def _add(path: Optional[Path]) -> None:
+        if not path:
+            return
+        try:
+            candidates.append(path.expanduser().resolve())
+        except Exception:
+            return
+
+    if script_file:
+        script_path = Path(script_file)
+        _add(script_path.parent.parent)
+        _add(script_path.parent)
+
+    for env_key in ('KAI_EXPORT_PPT_LITE_ROOT', 'CLAUDE_SKILL_DIR', 'CODEX_SKILL_DIR'):
+        raw = env.get(env_key)
+        if not raw:
+            continue
+        env_path = Path(raw)
+        _add(env_path)
+        _add(env_path.parent)
+        _add(env_path.parent.parent)
+
+    cwd_path = Path(cwd or Path.cwd())
+    _add(cwd_path)
+    for parent in cwd_path.parents:
+        _add(parent)
+
+    # Hosted sandboxes commonly install skills under /home/user/skills/<name>.
+    _add(Path.home() / 'skills' / 'kai-export-ppt-lite')
+    _add(Path('/home/user/skills/kai-export-ppt-lite'))
+
+    return candidates
+
+
+def _looks_like_repo_root(path: Path) -> bool:
+    return (
+        (path / 'scripts' / 'export-sandbox-pptx.py').exists() or
+        (path / 'contracts' / 'export_hints.schema.json').exists() or
+        (path / 'contracts' / 'slide_creator' / 'manifest.json').exists()
+    )
+
+
+def _resolve_repo_root(
+    script_file: Optional[str] = None,
+    cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Resolve the repo root without assuming __file__ exists.
+
+    Some hosted sandboxes execute skill code via exec()/notebook cells, so the
+    module-level __file__ global is absent. In that case we probe likely skill
+    install locations and gracefully fall back to the working directory.
+    """
+    fallback = Path(cwd or Path.cwd()).expanduser().resolve()
+    seen: Set[Path] = set()
+    for candidate in _candidate_repo_roots(script_file, cwd, env):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _looks_like_repo_root(candidate):
+            return candidate
+    return fallback
+
+
+REPO_ROOT = _resolve_repo_root(globals().get('__file__'))
 CONTRACTS_ROOT = REPO_ROOT / 'contracts'
 SLIDE_CREATOR_RUNTIME_CHROME_SELECTORS = [
     '.progress-bar',
@@ -10158,6 +10271,7 @@ def export_text_element(slide, elem, bg_color=None):
     single_line_contract_heading = (
         prefer_wrap_to_preserve_size and
         display_heading_like and
+        font_size_pt >= 28 and
         '\n' not in (elem.get('text', '') or '') and
         _can_preserve_single_line_contract_heading(
             elem,

@@ -26,6 +26,13 @@ spec = importlib.util.spec_from_file_location("export_sandbox", scripts_dir / "e
 export_sandbox = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(export_sandbox)
 
+run_skill_export_spec = importlib.util.spec_from_file_location(
+    "run_skill_export",
+    scripts_dir / "run-skill-export.py",
+)
+run_skill_export = importlib.util.module_from_spec(run_skill_export_spec)
+run_skill_export_spec.loader.exec_module(run_skill_export)
+
 sync_contracts_spec = importlib.util.spec_from_file_location(
     "sync_slide_creator_contracts",
     scripts_dir / "sync-slide-creator-contracts.py",
@@ -216,6 +223,37 @@ def test_detect_producer_requires_cross_mechanism_medium_signals():
     detection_with_watermark = detect_producer(soup_with_watermark, REPO_ROOT / 'demo' / 'dummy.html')
     assert detection_with_watermark['confidence'] == 'high', detection_with_watermark
     print("  PASS: producer detection uses cross-mechanism signals")
+
+
+def test_resolve_repo_root_survives_missing___file__():
+    """Inline execution environments should still locate the vendored skill root."""
+    resolve_repo_root = getattr(export_sandbox, '_resolve_repo_root')
+
+    from_cwd = resolve_repo_root(script_file=None, cwd=REPO_ROOT / 'scripts', env={})
+    assert from_cwd == REPO_ROOT, from_cwd
+
+    from_env = resolve_repo_root(
+        script_file=None,
+        cwd=Path('/tmp'),
+        env={'KAI_EXPORT_PPT_LITE_ROOT': str(REPO_ROOT)},
+    )
+    assert from_env == REPO_ROOT, from_env
+    print("  PASS: repo root fallback works without __file__")
+
+
+def test_run_skill_export_bootstrap_loads_installed_exporter():
+    """The small skill bootstrap should resolve the repo and load the exporter module."""
+    resolved = run_skill_export.resolve_skill_root(
+        explicit_root=str(REPO_ROOT),
+        script_file=None,
+        cwd=Path('/tmp'),
+        env={},
+    )
+    assert resolved == REPO_ROOT, resolved
+
+    module = run_skill_export.load_exporter_module(resolved)
+    assert getattr(module, 'export_sandbox', None) is not None
+    print("  PASS: skill bootstrap resolves root and loads exporter")
 
 
 def test_parse_css_rules_respects_media_queries_and_important():
@@ -897,7 +935,15 @@ def test_enterprise_dark_split_cards_stack_in_right_column():
 
     slides = parse_html_to_slides(html_path, 1440)
     root = slides[1]['elements'][0]
-    right_wrapper = next((child for child in root.get('children', []) if child.get('type') == 'container'), None)
+    right_wrapper = next(
+        (
+            child for child in root.get('children', [])
+            if child.get('type') == 'container'
+            and child.get('bounds', {}).get('width', 0) > 3.0
+            and len([grand for grand in child.get('children', []) if grand.get('type') == 'container']) >= 3
+        ),
+        None,
+    )
     assert right_wrapper is not None, root.get('children', [])
     right_cards = [child for child in right_wrapper.get('children', []) if child.get('type') == 'container']
     assert len(right_cards) >= 3, right_wrapper
@@ -3925,6 +3971,49 @@ def test_export_text_element_single_line_contract_title_stays_no_wrap():
     print("  PASS: single-line contract title stays no-wrap")
 
 
+def test_export_text_element_medium_contract_title_keeps_wrap_square():
+    """Smaller editorial contract titles should preserve authored block width with wrap enabled."""
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = int(914400 * 13.33)
+    prs.slide_height = int(914400 * 7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    elem = {
+        'type': 'text',
+        'tag': 'div',
+        'text': '从一个预设开始',
+        'segments': [
+            {'text': '从一个预设开始', 'color': '#1a1a18', 'fontSize': 'clamp(1.2rem, 3vw, 1.8rem)', 'fontFamily': '"Noto Serif SC", "EB Garamond", Georgia, serif', 'letterSpacing': '0.1em', 'bold': False, 'strike': False, 'bgColor': None, 'inlineBgBounds': None, 'kind': 'text'},
+        ],
+        'bounds': {'x': 4.14, 'y': 3.05, 'width': 5.56, 'height': 0.35},
+        'naturalHeight': 0.35,
+        'preferWrapToPreserveSize': True,
+        'shrinkForbidden': True,
+        '_text_contract_role': 'title',
+        'styles': {
+            'fontSize': 'clamp(1.2rem, 3vw, 1.8rem)',
+            'fontWeight': '300',
+            'fontFamily': '"Noto Serif SC", "EB Garamond", Georgia, serif',
+            'letterSpacing': '0.1em',
+            'color': '#1a1a18',
+            'textAlign': 'center',
+            'lineHeight': '1.3',
+            'paddingLeft': '0px',
+            'paddingRight': '0px',
+            'paddingTop': '0px',
+            'paddingBottom': '0px',
+        },
+    }
+
+    export_sandbox.export_text_element(slide, elem, (250, 250, 248))
+    tf = slide.shapes[-1].text_frame
+    assert tf.word_wrap is True, tf.word_wrap
+    assert tf.auto_size == export_sandbox.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, tf.auto_size
+    print("  PASS: medium contract title keeps wrap square")
+
+
 def test_export_text_element_wide_multiline_prose_wraps_from_measured_height():
     """Generic wide editorial prose should still wrap when layout already measured it as multiline."""
     from pptx import Presentation
@@ -4839,6 +4928,8 @@ def run_tests():
     test_parse_px_supports_minmax_math()
     test_validate_export_hints_rejects_unknown_layout_fields()
     test_detect_producer_requires_cross_mechanism_medium_signals()
+    test_resolve_repo_root_survives_missing___file__()
+    test_run_skill_export_bootstrap_loads_installed_exporter()
     test_parse_css_rules_respects_media_queries_and_important()
     test_selector_matches_ignores_dynamic_hover_state()
     test_parse_grid_track_widths_handles_split_and_auto_fit()
@@ -4980,6 +5071,8 @@ def run_tests():
     test_export_text_element_keeps_narrow_card_copy_wrapping_instead_of_shrinking()
     test_export_text_element_preserves_contract_authored_breaks_without_shrinking()
     test_export_text_element_prefers_wrap_to_preserve_size_for_body_prose()
+    test_export_text_element_single_line_contract_title_stays_no_wrap()
+    test_export_text_element_medium_contract_title_keeps_wrap_square()
     test_build_text_element_centered_block_command_shrinkwraps()
     test_export_shape_background_small_stamp_seal_keeps_border_without_shadow()
     test_chinese_chan_roundtrip_wrap_fidelity_and_no_page_overflow()

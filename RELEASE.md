@@ -1,5 +1,47 @@
 # Release Notes
 
+## v1.5.1 - 2026-04-25
+
+This release tightens the exporter's skill/runtime execution boundary and closes two real regressions found while rerunning the full suite. The shipped work makes the single-file exporter the correctness boundary for hosted sandboxes, while still keeping an optional bootstrap path for richer environments.
+
+本次版本重点是收紧 exporter 的 skill/runtime 执行边界，并修掉两条在完整回归中暴露出来的真实问题。核心原则变成：单文件主导出器就是 hosted sandbox 的 correctness boundary；环境更丰富时仍可使用可选 bootstrap，但不再把它当作前提假设。
+
+### Highlights
+
+- Version bump to `v1.5.1`
+- Hardened sandbox execution behavior:
+  - tolerate missing `__file__`
+  - probe repo/contracts paths opportunistically and degrade cleanly when absent
+  - attempt runtime dependency bootstrap before failing hard
+- Added optional hosted-sandbox bootstrap surfaces:
+  - `scripts/run-skill-export.py`
+  - `requirements.txt`
+  - updated `SKILL.md` execution protocol
+- Fixed two regressions discovered while rerunning the full suite:
+  - Enterprise Dark split-right-rail test was selecting the wrong container
+  - Chinese Chan closing title was incorrectly exported with `wrap="none"` instead of preserving wrapped width rhythm
+- Regression coverage expanded with:
+  - medium contract title wrap guard
+  - retained single-line contract title no-wrap guard
+  - full `Chinese Chan` roundtrip wrap fidelity
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/run-skill-export.py scripts/test-export.py
+python3 scripts/test-export.py
+```
+
+Result:
+
+- Full regression suite: `All tests passed!`
+- Verified regressions:
+  - Enterprise Dark split cards stack in the correct right rail
+  - Chinese Chan closing title keeps `wrap="square"`
+  - single-line large contract titles still keep `no-wrap` where intended
+
 ## v1.5.0 - 2026-04-25
 
 This release moves `Swiss Modern` from “recognized preset metadata” to a real contract-driven export path. The shipped work includes synced Swiss contracts, runtime role-aware layout builders, and text reflow fixes that close real regressions on the `kingdee` sample deck.
