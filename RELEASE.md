@@ -1,5 +1,50 @@
 # Release Notes
 
+## Unreleased - 2026-04-28
+
+This branch finishes the current `Aurora Mesh` optimization pass and pushes the real visual compare snapshot to `9.00/10`. The main shipped work is not broader preset churn; it is a focused Aurora export-quality correction around background fallback, KPI sizing, and preset-specific layout fidelity.
+
+本次未发布变更完成了当前这轮 `Aurora Mesh` 优化，并把真实视觉对比分数推进到 `9.00/10`。核心交付不是继续扩散到更多 preset，而是集中修正 Aurora 的背景退化、KPI 宽度策略，以及 preset-specific 布局 fidelity。
+
+### Highlights
+
+- `Aurora Mesh` visual compare snapshot: `9.00/10`
+- Replaced the previous near-black fallback with an atmospheric solid-color approximation derived from the authored aurora mesh layers
+- Kept Aurora KPI tracks compact by default, but still honor explicit authored stretch signals from source CSS
+- Preserved Aurora wrapper-centered layout and install-card structure while keeping:
+  - `overflow = 0`
+  - `overlap = 0`
+- Expanded Aurora regression coverage for:
+  - mesh-background fallback behavior
+  - compact-vs-stretch KPI width decisions
+  - wrapper centering
+  - install-card separation
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py scripts/sync-slide-creator-contracts.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
+Result:
+
+- Full regression suite: `All tests passed!`
+- `Aurora Mesh` structured checks:
+  - `overflow = 0`
+  - `overlap = 0`
+- `Aurora Mesh` visual compare:
+  - overall `9.00/10`
+  - Slide 01 `9.1/10`
+  - Slide 04 `9.2/10`
+  - Slide 05 `8.9/10`
+  - Slide 06 `8.8/10`
+  - Slide 08 `8.9/10`
+
 ## v1.5.1 - 2026-04-25
 
 This release tightens the exporter's skill/runtime execution boundary and closes two real regressions found while rerunning the full suite. The shipped work makes the single-file exporter the correctness boundary for hosted sandboxes, while still keeping an optional bootstrap path for richer environments.

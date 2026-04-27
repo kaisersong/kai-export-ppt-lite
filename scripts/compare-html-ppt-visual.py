@@ -22,11 +22,13 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import fitz
 import numpy as np
@@ -34,25 +36,238 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from pptx import Presentation
 from pptx.enum.dml import MSO_FILL
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_SHAPE_TYPE
+from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
 from playwright.sync_api import sync_playwright
 from skimage.metrics import structural_similarity
 
 
 VIEWPORT_W = 1440
 VIEWPORT_H = 900
+EMU_PER_INCH = 914400
+EMU_PER_PT = 12700
 
 
-def _load_font(size: int) -> ImageFont.ImageFont:
-    for path in (
+def _font_paths_for_family(family: Optional[str]) -> Tuple[str, ...]:
+    family_name = (family or "").lower()
+    candidates: List[str] = []
+    if "baskerville" in family_name:
+        candidates.extend((
+            "/System/Library/Fonts/Supplemental/Baskerville.ttc",
+            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        ))
+    if any(token in family_name for token in ("hiragino", "pingfang", "noto sans sc")):
+        candidates.extend((
+            "/System/Library/Fonts/Supplemental/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ))
+    if any(token in family_name for token in ("inter", "dm sans", "helvetica", "arial")):
+        candidates.extend((
+            "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ))
+    candidates.extend((
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/Supplemental/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/PingFang.ttc",
-    ):
+    ))
+    deduped: List[str] = []
+    for path in candidates:
+        if path not in deduped:
+            deduped.append(path)
+    return tuple(deduped)
+
+
+@lru_cache(maxsize=256)
+def _load_font(size: int, family: Optional[str] = None) -> ImageFont.ImageFont:
+    for path in _font_paths_for_family(family):
         try:
             return ImageFont.truetype(path, size=size)
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+def _shape_fill_color(shape) -> Optional[Tuple[int, int, int]]:
+    try:
+        if shape.fill.type == MSO_FILL.SOLID:
+            return tuple(int(c) for c in shape.fill.fore_color.rgb)
+    except Exception:
+        pass
+    return None
+
+
+def _shape_text_props(shape, default_color: Tuple[int, int, int], slide_h_emu: int) -> Dict[str, object]:
+    family = None
+    font_px = None
+    color = default_color
+    bold = False
+    align = None
+    vertical_anchor = None
+
+    try:
+        tf = shape.text_frame
+        vertical_anchor = tf.vertical_anchor
+        for para in tf.paragraphs:
+            if para.alignment is not None and align is None:
+                align = para.alignment
+            for run in para.runs:
+                if not run.text:
+                    continue
+                if family is None and run.font.name:
+                    family = run.font.name
+                if font_px is None and run.font.size:
+                    font_px = max(
+                        8,
+                        int(round((int(run.font.size) / slide_h_emu) * VIEWPORT_H)),
+                    )
+                try:
+                    if run.font.color and run.font.color.rgb:
+                        color = tuple(int(c) for c in run.font.color.rgb)
+                except Exception:
+                    pass
+                if run.font.bold:
+                    bold = True
+                if family is not None and font_px is not None:
+                    break
+            if family is not None and font_px is not None:
+                break
+    except Exception:
+        pass
+
+    text_value = ""
+    try:
+        text_value = shape.text or ""
+    except Exception:
+        text_value = ""
+    if any(ord(ch) > 127 for ch in text_value):
+        family_lc = (family or "").lower()
+        if not any(token in family_lc for token in ("hiragino", "pingfang", "noto sans", "source han")):
+            family = "PingFang SC"
+
+    return {
+        "family": family,
+        "font_px": font_px or 22,
+        "color": color,
+        "bold": bold,
+        "align": align,
+        "vertical_anchor": vertical_anchor,
+    }
+
+
+def _text_size(font: ImageFont.ImageFont, text: str) -> Tuple[int, int]:
+    if not text:
+        return (0, 0)
+    bbox = font.getbbox(text)
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def _wrap_text_to_width(text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+    if not text:
+        return [""]
+    if max_width <= 4:
+        return [text]
+
+    tokens = [text] if " " not in text.strip() else []
+    if not tokens:
+        import re
+        tokens = re.findall(r"\S+\s*", text)
+        if not tokens:
+            tokens = list(text)
+
+    lines: List[str] = []
+    current = ""
+    for token in tokens:
+        candidate = f"{current}{token}"
+        if current and _text_size(font, candidate.rstrip())[0] > max_width:
+            lines.append(current.rstrip())
+            current = token.lstrip()
+            if _text_size(font, current)[0] > max_width and " " not in token:
+                char_line = ""
+                for ch in token:
+                    next_candidate = f"{char_line}{ch}"
+                    if char_line and _text_size(font, next_candidate)[0] > max_width:
+                        lines.append(char_line)
+                        char_line = ch
+                    else:
+                        char_line = next_candidate
+                current = char_line
+        else:
+            current = candidate
+    if current:
+        lines.append(current.rstrip())
+    return lines or [text]
+
+
+def _draw_shape_text(
+    img: Image.Image,
+    shape,
+    box: Tuple[int, int, int, int],
+    bg: Tuple[int, int, int],
+    slide_w_emu: int,
+    slide_h_emu: int,
+) -> None:
+    text = shape.text.strip()
+    if not text:
+        return
+
+    props = _shape_text_props(shape, (24, 24, 24) if sum(bg) > 384 else (235, 235, 235), slide_h_emu)
+    font = _load_font(int(props["font_px"]), props["family"])
+    fill = props["color"]
+
+    tf = shape.text_frame
+    margin_l = int(tf.margin_left / slide_w_emu * VIEWPORT_W) if tf.margin_left else 0
+    margin_r = int(tf.margin_right / slide_w_emu * VIEWPORT_W) if tf.margin_right else 0
+    margin_t = int(tf.margin_top / slide_h_emu * VIEWPORT_H) if tf.margin_top else 0
+    margin_b = int(tf.margin_bottom / slide_h_emu * VIEWPORT_H) if tf.margin_bottom else 0
+
+    x, y, w, h = box
+    text_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_img)
+    inner_x = margin_l
+    inner_y = margin_t
+    inner_w = max(w - margin_l - margin_r, 4)
+    inner_h = max(h - margin_t - margin_b, 4)
+
+    paragraphs: List[Tuple[List[str], ImageFont.ImageFont, Tuple[int, int, int], object]] = []
+    block_h = 0
+    para_gap = max(int(props["font_px"] * 0.25), 2)
+    for para in tf.paragraphs:
+        para_text = para.text.strip()
+        if not para_text:
+            continue
+        para_align = para.alignment if para.alignment is not None else props["align"]
+        lines = _wrap_text_to_width(para_text, font, inner_w)
+        line_h = max(_text_size(font, "Ag")[1], int(props["font_px"] * 1.18))
+        block_h += line_h * len(lines)
+        paragraphs.append((lines, font, fill, para_align))
+        block_h += para_gap
+    if paragraphs:
+        block_h -= para_gap
+
+    start_y = inner_y
+    vertical_anchor = props["vertical_anchor"]
+    if block_h < inner_h and vertical_anchor in {MSO_VERTICAL_ANCHOR.MIDDLE, MSO_VERTICAL_ANCHOR.MIXED}:
+        start_y = inner_y + max((inner_h - block_h) // 2, 0)
+    elif block_h < inner_h and vertical_anchor == MSO_VERTICAL_ANCHOR.BOTTOM:
+        start_y = inner_y + max(inner_h - block_h, 0)
+
+    cursor_y = start_y
+    for lines, para_font, para_fill, para_align in paragraphs:
+        line_h = max(_text_size(para_font, "Ag")[1], int(props["font_px"] * 1.18))
+        for line in lines:
+            line_w, _ = _text_size(para_font, line)
+            if para_align == PP_ALIGN.CENTER:
+                line_x = inner_x + max((inner_w - line_w) // 2, 0)
+            elif para_align == PP_ALIGN.RIGHT:
+                line_x = inner_x + max(inner_w - line_w, 0)
+            else:
+                line_x = inner_x
+            text_draw.text((line_x, cursor_y), line, fill=(*para_fill, 255), font=para_font)
+            cursor_y += line_h
+        cursor_y += para_gap
+
+    img.alpha_composite(text_img, dest=(x, y))
 
 
 def _html_slide_count(html_path: Path) -> int:
@@ -177,7 +392,7 @@ def _render_ppt_slides_preview(pptx_path: Path, output_dir: Path) -> List[Path]:
     out_paths: List[Path] = []
     for idx, slide in enumerate(prs.slides):
         bg = _slide_bg_color(slide) or (240, 240, 240)
-        img = Image.new("RGB", (VIEWPORT_W, VIEWPORT_H), bg)
+        img = Image.new("RGBA", (VIEWPORT_W, VIEWPORT_H), (*bg, 255))
         draw = ImageDraw.Draw(img)
 
         for shape in slide.shapes:
@@ -192,21 +407,41 @@ def _render_ppt_slides_preview(pptx_path: Path, output_dir: Path) -> List[Path]:
             if w < 2 or h < 2:
                 continue
 
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    pic = Image.open(io.BytesIO(shape.image.blob)).convert("RGBA")
+                    if pic.size != (w, h):
+                        pic = pic.resize((w, h), Image.Resampling.LANCZOS)
+                    img.alpha_composite(pic, dest=(x, y))
+                except Exception:
+                    pass
+                continue
+
             fill = _safe_fill_color(shape)
             if fill:
-                draw.rounded_rectangle([x, y, x + w - 1, y + h - 1], radius=max(min(w, h) // 10, 2), fill=fill)
+                auto_shape = None
+                try:
+                    auto_shape = shape.auto_shape_type
+                except Exception:
+                    auto_shape = None
+                if auto_shape == MSO_AUTO_SHAPE_TYPE.OVAL:
+                    draw.ellipse([x, y, x + w - 1, y + h - 1], fill=fill)
+                elif auto_shape == MSO_AUTO_SHAPE_TYPE.RECTANGLE:
+                    draw.rectangle([x, y, x + w - 1, y + h - 1], fill=fill)
+                else:
+                    draw.rounded_rectangle(
+                        [x, y, x + w - 1, y + h - 1],
+                        radius=max(min(w, h) // 10, 2),
+                        fill=fill,
+                    )
 
             if getattr(shape, "has_text_frame", False) and shape.text.strip():
-                text = shape.text.strip()
-                text_fill = (24, 24, 24) if sum(bg) > 384 else (235, 235, 235)
-                # Use smaller font for narrow boxes to avoid dominating the preview.
-                use_font = font_small if h < 48 else font
-                draw.multiline_text((x + 6, y + 4), text, fill=text_fill, font=use_font, spacing=4)
+                _draw_shape_text(img, shape, (x, y, w, h), bg, slide_w, slide_h)
             elif getattr(shape, "has_text_frame", False):
                 draw.rectangle([x, y, x + w - 1, y + h - 1], outline=(80, 80, 80), width=1)
 
         out_path = output_dir / f"slide-{idx+1:02d}.png"
-        img.save(out_path)
+        img.convert("RGB").save(out_path)
         out_paths.append(out_path)
 
     return out_paths

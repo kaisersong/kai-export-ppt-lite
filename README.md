@@ -42,6 +42,15 @@ Current release: `v1.5.1`
   - 已确认文件级文字语义：
   - `P3 body wrap = square`
   - `P5 title wrap = none`
+- `Aurora Mesh`
+  - 源 HTML：`demo/aurora-mesh-zh.html`
+  - 当前分支最新完整视觉对比分数：`9.00/10`
+  - 当前结构化评估：
+  - `overflow = 0`
+  - `overlap = 0`
+  - 这轮优化重点：
+  - 动态 mesh 背景降级为接近源稿氛围的纯色，而不是伪造大椭圆或退回纯黑
+  - KPI 组件默认保持紧凑，只有源 CSS 明确给出 stretch 信号时才拉宽
 
 整体上，这条分支已经明显从“按页打补丁”转成了“增强 exporter 通用能力 + producer-aware preset contract”。仍未达到“所有风格都稳定每页 >= 9.5”的最终目标，但 `Chinese Chan` 这类高度依赖字体与换行节奏的 preset 已经被真正拉上来。
 

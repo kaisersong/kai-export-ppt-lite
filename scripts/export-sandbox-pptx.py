@@ -596,6 +596,31 @@ def parse_color(css_color: str, bg: Tuple[int, int, int] = (255, 255, 255)) -> O
     return None
 
 
+def _parse_rgba_color(css_color: str) -> Optional[Tuple[int, int, int, float]]:
+    """Parse CSS color into RGBA without compositing alpha onto a background."""
+    if not css_color or css_color in ('transparent',) or 'rgba(0, 0, 0, 0)' in css_color:
+        return None
+    token = css_color.strip()
+    if token.startswith('var('):
+        var_match = re.match(r'var\((--[^),]+)', token)
+        if not var_match:
+            return None
+        token = (_ROOT_CSS_VARS.get(var_match.group(1), '') or '').strip()
+        if not token:
+            return None
+    m = re.search(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', token)
+    if m:
+        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        a = float(m.group(4)) if m.group(4) else 1.0
+        if a <= 0:
+            return None
+        return (r, g, b, max(0.0, min(a, 1.0)))
+    rgb = parse_color(token)
+    if rgb:
+        return (*rgb, 1.0)
+    return None
+
+
 def px_to_pt(px_value: str) -> float:
     """Convert a CSS length value to points (1pt = 1/72in, 1px ≈ 0.75pt at 96 DPI)."""
     px_value = str(px_value)
@@ -1425,6 +1450,31 @@ def _has_drawable_background(style: Dict[str, str]) -> bool:
     return _should_create_bg_shape(style, has_gradient_bg)
 
 
+def _preserves_stacked_child_structure(element: Tag, style: Dict[str, str]) -> bool:
+    """Return True when a container's direct children carry semantic layout."""
+    display = (style.get('display', '') or '').strip()
+    flex_dir = (
+        style.get('flexDirection', '') or
+        style.get('flex-direction', '') or
+        ''
+    ).strip()
+    if display not in ('flex', 'inline-flex') or flex_dir != 'column':
+        return False
+
+    direct_tags = [child for child in element.children if isinstance(child, Tag)]
+    if len(direct_tags) < 2:
+        return False
+
+    # Column stacks like Aurora stats intentionally separate metric, label,
+    # and supporting copy into distinct rows. Flattening them into one text box
+    # destroys the hierarchy and breaks gradient/stat emphasis.
+    meaningful_children = [
+        child for child in direct_tags
+        if child.name.lower() not in ('br',)
+    ]
+    return len(meaningful_children) >= 2
+
+
 def is_leaf_text_container(element: Tag, css_rules: Optional[List] = None) -> bool:
     """Check if element's entire visible content is text (no block children)."""
     children = list(element.children)
@@ -1442,6 +1492,10 @@ def is_leaf_text_container(element: Tag, css_rules: Optional[List] = None) -> bo
         # If inline child has visible bg/border, it should be extracted separately
         if rules and has_visible_bg_or_border(compute_element_style(child, rules, child.get('style', ''))):
             has_inline_with_bg = True
+    if rules:
+        style = compute_element_style(element, rules, element.get('style', ''))
+        if _preserves_stacked_child_structure(element, style):
+            return False
     if has_inline_with_bg:
         return False  # Don't treat as leaf — recurse so each styled span gets its own shape
     return bool(get_text_content(element).strip())
@@ -2127,6 +2181,8 @@ def _should_apply_display_heading_boost(tag: str, style: Dict[str, str], text: s
     if not is_bold(style.get('fontWeight', '400')):
         return False
     font_stack = (style.get('fontFamily', '') or '').lower()
+    if 'space grotesk' in font_stack:
+        return False
     if not any(token in font_stack for token in ('inter', 'dm sans', 'clash display', 'satoshi', 'noto sans', 'system-ui')):
         return False
     font_px = parse_px(style.get('fontSize', '16px'))
@@ -2675,6 +2731,8 @@ def _looks_like_metric_token(text: str) -> bool:
         return False
     if re.fullmatch(r'[<>]?\d+(?:\.\d+)?(?:[%+]|vh|vw|s|x)?', token, re.IGNORECASE):
         return True
+    if re.fullmatch(r'[<>]?\d+(?:\.\d+)?[A-Za-z]{1,6}', token, re.IGNORECASE):
+        return True
     if re.fullmatch(r'[A-Za-z]{1,6}\+?', token):
         return True
     if re.fullmatch(r'[A-Za-z]{1,6}\d*[+%]?', token):
@@ -2979,6 +3037,47 @@ def _prepare_slide_content_root(
     return slide_html, layout_info, overlay_nodes
 
 
+def _effective_slide_layout_style(
+    slide_html: Tag,
+    css_rules: List[CSSRule],
+    base_style: Dict[str, str],
+    contract: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Merge preset wrapper layout hints into the slide-level flow style."""
+    effective = dict(base_style or {})
+
+    contract_id = (contract or {}).get('contract_id', '')
+    if contract_id != 'slide-creator/aurora-mesh':
+        return effective
+
+    aurora_wrapper = _direct_child_matches_selector(slide_html, '.aurora-slide')
+    if aurora_wrapper is None:
+        return effective
+
+    wrapper_style = compute_element_style(
+        aurora_wrapper,
+        css_rules,
+        aurora_wrapper.get('style', ''),
+        base_style,
+    )
+    for key in (
+        'justifyContent',
+        'justify-content',
+        'alignItems',
+        'align-items',
+        'padding',
+        'paddingTop',
+        'paddingRight',
+        'paddingBottom',
+        'paddingLeft',
+    ):
+        value = wrapper_style.get(key, '')
+        if value:
+            effective[key] = value
+
+    return effective
+
+
 def _resolve_box_padding_in(
     style: Dict[str, str],
     basis_w_px: float,
@@ -3097,6 +3196,151 @@ def _resolve_flex_basis_in(
     if fallback_ratio > 0 and basis_px > 0:
         return (basis_px / PX_PER_IN) * fallback_ratio
     return 0.0
+
+
+def _style_has_explicit_width_signal(style: Dict[str, str]) -> bool:
+    for key in ('width', 'minWidth', 'min-width', 'maxWidth', 'max-width', 'flexBasis', 'flex-basis'):
+        raw = (style.get(key, '') or '').strip()
+        if raw and raw not in {'auto', 'none', 'fit-content', 'min-content', 'max-content'}:
+            return True
+
+    flex_value = (style.get('flex', '') or '').strip()
+    if not flex_value:
+        return False
+
+    parts = flex_value.split()
+    if len(parts) >= 3 and parts[2] not in {'auto', 'none'}:
+        return True
+    return False
+
+
+def _style_flex_grow_value(style: Dict[str, str]) -> float:
+    for key in ('flexGrow', 'flex-grow'):
+        raw = (style.get(key, '') or '').strip()
+        if not raw:
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            continue
+
+    flex_value = (style.get('flex', '') or '').strip()
+    if flex_value:
+        first = flex_value.split()[0]
+        try:
+            return float(first)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _contract_vertical_card_prefers_stretch_width(style: Dict[str, str]) -> bool:
+    if _style_flex_grow_value(style) > 0.0:
+        return True
+    return _style_has_explicit_width_signal(style)
+
+
+def _measure_contract_vertical_card_intrinsic_width_in(
+    element: Tag,
+    style: Dict[str, str],
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    max_width_in: float,
+    slot_model: Dict[str, Any],
+) -> float:
+    """Measure a compact vertical-card width unless CSS explicitly asks it to stretch."""
+    direct_children = [child for child in element.children if isinstance(child, Tag)]
+    if not direct_children:
+        return 0.0
+
+    _expand_padding(style)
+    pad_l = parse_px(style.get('paddingLeft', '0px')) / PX_PER_IN
+    pad_r = parse_px(style.get('paddingRight', '0px')) / PX_PER_IN
+    border_l = _extract_border_width_in(style, 'borderLeft')
+    border_r = _extract_border_width_in(style, 'borderRight')
+    inner_cap_in = max(max_width_in - pad_l - pad_r - border_l - border_r, 0.3)
+    inner_cap_px = inner_cap_in * PX_PER_IN
+    max_child_w = 0.0
+
+    for idx, child in enumerate(direct_children):
+        child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
+        child_classes = _element_classes(child)
+        child_text = get_text_content(child).strip()
+        metric_like = bool(
+            child_classes.intersection({'ds-kpi', 'feat-stat', 'sol-icon'}) or
+            (
+                idx == 0 and
+                slot_model.get('metric_single_line') and
+                _looks_like_metric_token(child_text)
+            )
+        )
+
+        child_w = 0.0
+        if child.name == 'svg':
+            child_el = build_svg_container(
+                child,
+                css_rules,
+                style,
+                slide_width_px,
+                inner_cap_px,
+            )
+            if child_el:
+                child_w = child_el.get('bounds', {}).get('width', 0.0)
+        elif child.name in TEXT_TAGS or child_text:
+            if metric_like:
+                child_el = build_text_element(
+                    child,
+                    child_style,
+                    css_rules,
+                    slide_width_px,
+                    None,
+                )
+                if child_el and child_el.get('type') == 'text':
+                    child_w = child_el.get('bounds', {}).get('width', 0.0)
+            else:
+                child_w = compute_text_content_width(child, css_rules, style)
+                if child_w <= 0.0:
+                    child_el = build_text_element(
+                        child,
+                        child_style,
+                        css_rules,
+                        slide_width_px,
+                        inner_cap_px,
+                    )
+                    if child_el:
+                        child_w = child_el.get('bounds', {}).get('width', 0.0)
+        elif is_leaf_text_container(child, css_rules):
+            child_w = compute_text_content_width(child, css_rules, style)
+        elif (
+            child.name in CONTAINER_TAGS and
+            (has_visible_bg_or_border(child_style) or child_style.get('backgroundImage', 'none') != 'none')
+        ):
+            explicit_w = _resolve_css_length_with_basis(child_style.get('width', ''), inner_cap_px)
+            if explicit_w <= 0:
+                explicit_w = _resolve_css_length_with_basis(child_style.get('maxWidth', ''), inner_cap_px)
+            if explicit_w > 0:
+                child_w = explicit_w / PX_PER_IN
+
+        if child_w > 0.0:
+            max_child_w = max(max_child_w, min(child_w, inner_cap_in))
+
+    measured = max(max_child_w + pad_l + pad_r + border_l + border_r, 0.5)
+
+    min_w = _resolve_css_length_with_basis(
+        style.get('minWidth', style.get('min-width', '')),
+        max_width_in * PX_PER_IN,
+    )
+    if min_w > 0:
+        measured = max(measured, min_w / PX_PER_IN)
+
+    max_w = _resolve_css_length_with_basis(
+        style.get('maxWidth', style.get('max-width', '')),
+        max_width_in * PX_PER_IN,
+    )
+    if max_w > 0:
+        measured = min(measured, max_w / PX_PER_IN)
+
+    return min(measured, max_width_in)
 
 
 def _coerce_relative_container(
@@ -3866,6 +4110,20 @@ def _build_contract_vertical_card(
                 slide_width_px,
                 child_cw_px,
             )
+        elif (
+            is_leaf_text_container(child, css_rules) and
+            (has_visible_bg_or_border(child_style) or child_style.get('backgroundImage', 'none') != 'none')
+        ):
+            built = flat_extract(
+                child,
+                css_rules,
+                style,
+                slide_width_px,
+                content_width_px=child_cw_px,
+                local_origin=True,
+                contract=contract,
+            )
+            child_el = _coerce_relative_container(child, child_style, built)
         elif (
             child.name in CONTAINER_TAGS and
             (has_visible_bg_or_border(child_style) or child_style.get('backgroundImage', 'none') != 'none') and
@@ -5622,14 +5880,17 @@ def _build_explicit_track_elements(
         return None
 
     child_tags = [c for c in element.children if isinstance(c, Tag)]
-    if not child_tags:
-        return None
     if any(get_text_content(child).strip() for child in child_tags):
         return None
 
     basis_px = parse_px(style.get('width', ''))
     if basis_px <= 0:
         basis_px = content_width_px or 0.0
+    if basis_px <= 0:
+        # Hero slides often place thin divider tracks directly under the slide
+        # root without an intermediate max-width content wrapper. Fall back to
+        # the authored slide inner width instead of the generic 1" block path.
+        basis_px = max((SLIDE_W_IN - 1.0) * PX_PER_IN, 0.0)
     if basis_px <= 0:
         return None
 
@@ -5646,7 +5907,12 @@ def _build_explicit_track_elements(
         'height': track_h_px / PX_PER_IN,
     }
 
+    # Simple empty dividers still need to export as a thin track shape instead
+    # of falling back to the generic 12.33" x 1.0" block placeholder path.
     results = [track_shape]
+    if not child_tags:
+        return results
+
     for child in child_tags:
         child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
         if not _has_drawable_background(child_style):
@@ -7046,11 +7312,44 @@ def build_grid_children(
         flex_children = tag_children
         fixed_total = 0.0
         flex_slots = []
+        contract_id = (contract or {}).get('contract_id', '')
         for idx, child in enumerate(flex_children):
             child_style = compute_element_style(child, css_rules, child.get('style', ''), style)
             child_tag = child.name.lower()
+            child_component_name = _contract_component_name(child, contract)
+            child_slot_model = (
+                _contract_slot_model(contract, child_component_name)
+                if contract_id in {'slide-creator/data-story', 'slide-creator/aurora-mesh'}
+                else {}
+            )
             child_w = 0.0
             css_w = parse_px(child_style.get('width', ''))
+
+            if (
+                contract_id == 'slide-creator/aurora-mesh' and
+                child_slot_model.get('layout') == 'vertical_card'
+            ):
+                stretch_track = _contract_vertical_card_prefers_stretch_width(child_style)
+                if not stretch_track:
+                    compact_cap_in = max(
+                        (flex_inner_width_in - gap_in * max(len(flex_children) - 1, 0)) / max(len(flex_children), 1),
+                        0.8,
+                    )
+                    child_w = _measure_contract_vertical_card_intrinsic_width_in(
+                        child,
+                        child_style,
+                        css_rules,
+                        slide_width_px,
+                        compact_cap_in,
+                        child_slot_model,
+                    )
+                    if child_w > 0:
+                        fixed_total += child_w
+                        flex_child_widths.append(child_w)
+                        continue
+                flex_slots.append(idx)
+                flex_child_widths.append(0.0)
+                continue
 
             if css_w > 0:
                 child_w = css_w / PX_PER_IN
@@ -7153,7 +7452,7 @@ def build_grid_children(
         child_component_name = _contract_component_name(child, contract)
         child_slot_model = (
             _contract_slot_model(contract, child_component_name)
-            if (contract or {}).get('contract_id') == 'slide-creator/data-story'
+            if (contract or {}).get('contract_id') in {'slide-creator/data-story', 'slide-creator/aurora-mesh'}
             else {}
         )
         base_col_idx = grid_child_idx % max(num_cols, 1)
@@ -8213,6 +8512,193 @@ def _extract_grid_background_from_style(style: Dict[str, str]) -> Optional[Dict[
     return {'color': color_value, 'sizePx': size_px}
 
 
+_RADIAL_MESH_RE = re.compile(
+    r"radial-gradient\(\s*ellipse\s+at\s+([\d.]+)%\s+([\d.]+)%,\s*"
+    r"((?:rgba?\([^)]+\))|(?:#[0-9a-fA-F]{3,8})|(?:var\(--[^)]+\)))\s+0%,\s*"
+    r"transparent\s+([\d.]+)%\s*\)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_aurora_mesh_background_from_style(style: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    bg_image = style.get('backgroundImage', '')
+    if bg_image.count('radial-gradient(') < 2:
+        return None
+
+    layers: List[Dict[str, Any]] = []
+    for match in _RADIAL_MESH_RE.finditer(bg_image):
+        rgba = _parse_rgba_color(match.group(3))
+        if not rgba:
+            continue
+        layers.append({
+            'cx_pct': float(match.group(1)),
+            'cy_pct': float(match.group(2)),
+            'color': rgba,
+            'radius_pct': float(match.group(4)),
+        })
+
+    if len(layers) < 2:
+        return None
+
+    base_rgb = parse_color(style.get('backgroundColor', '')) or (10, 10, 26)
+    return {
+        'kind': 'aurora-mesh',
+        'baseColor': base_rgb,
+        'layers': layers,
+    }
+
+
+def extract_body_mesh_background(
+    body_style: Dict[str, str],
+    contract: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if contract and (contract.get('contract_id') != 'slide-creator/aurora-mesh'):
+        return None
+    return _extract_aurora_mesh_background_from_style(body_style)
+
+
+def _composite_rgba_over_bg(
+    rgba: Tuple[int, int, int, float],
+    bg: Tuple[int, int, int],
+) -> Tuple[int, int, int]:
+    r, g, b, alpha = rgba
+    alpha = max(0.0, min(alpha, 1.0))
+    return (
+        int(alpha * r + (1.0 - alpha) * bg[0]),
+        int(alpha * g + (1.0 - alpha) * bg[1]),
+        int(alpha * b + (1.0 - alpha) * bg[2]),
+    )
+
+
+def _approximate_aurora_mesh_solid_color(
+    mesh_bg: Optional[Dict[str, Any]],
+) -> Optional[Tuple[int, int, int]]:
+    """Approximate aurora mesh backgrounds with a close solid color.
+
+    We intentionally avoid exporting the animated mesh itself for Aurora decks,
+    but falling all the way back to the body base color (`#0a0a1a`) makes the
+    slide look much flatter than the source. Sample a low-resolution composite
+    of the mesh layers and use its average as the solid slide fill.
+    """
+    if not mesh_bg:
+        return None
+
+    base = mesh_bg.get('baseColor') or (10, 10, 26)
+    layers = mesh_bg.get('layers') or []
+    if not layers:
+        return base
+
+    sample_w = 56
+    sample_h = 36
+    total_r = 0.0
+    total_g = 0.0
+    total_b = 0.0
+
+    for iy in range(sample_h):
+        y_pct = (iy + 0.5) * 100.0 / sample_h
+        for ix in range(sample_w):
+            x_pct = (ix + 0.5) * 100.0 / sample_w
+            r, g, b = float(base[0]), float(base[1]), float(base[2])
+
+            for layer in layers:
+                rgba = layer.get('color')
+                if not rgba:
+                    continue
+                lr, lg, lb, alpha = rgba
+                radius_pct = max(float(layer.get('radius_pct', 50.0)), 12.0)
+                rx_pct = max(radius_pct * 1.05, 8.0)
+                ry_pct = max(radius_pct * 0.96, 7.0)
+                dx = (x_pct - float(layer.get('cx_pct', 50.0))) / rx_pct
+                dy = (y_pct - float(layer.get('cy_pct', 50.0))) / ry_pct
+                dist = dx * dx + dy * dy
+                if dist >= 1.0:
+                    continue
+
+                # Soft radial falloff roughly matching the blurred ellipse path.
+                local_alpha = max(0.0, min(alpha, 1.0)) * ((1.0 - dist) ** 1.2)
+                r = local_alpha * lr + (1.0 - local_alpha) * r
+                g = local_alpha * lg + (1.0 - local_alpha) * g
+                b = local_alpha * lb + (1.0 - local_alpha) * b
+
+            total_r += r
+            total_g += g
+            total_b += b
+
+    samples = float(sample_w * sample_h)
+    avg = (
+        int(round(total_r / samples)),
+        int(round(total_g / samples)),
+        int(round(total_b / samples)),
+    )
+    dominant_layer = max(
+        (layer for layer in layers if layer.get('color')),
+        key=lambda layer: float(layer.get('radius_pct', 0.0)) * float(layer['color'][3]),
+        default=None,
+    )
+    dominant_comp = _composite_rgba_over_bg(dominant_layer['color'], base) if dominant_layer else avg
+
+    # Bias the solid fallback slightly toward the strongest mesh layer. Aurora's
+    # browser rendering reads more purple than a plain arithmetic average.
+    return (
+        int(round(avg[0] * 0.65 + dominant_comp[0] * 0.35)),
+        int(round(avg[1] * 0.65 + dominant_comp[1] * 0.35)),
+        int(round(avg[2] * 0.65 + dominant_comp[2] * 0.35)),
+    )
+
+
+def build_aurora_mesh_overlay_elements(
+    mesh_bg: Optional[Dict[str, Any]],
+    slide_width_px: float,
+    slide_height_px: float,
+) -> List[Dict[str, Any]]:
+    if not mesh_bg:
+        return []
+
+    slide_w_in = slide_width_px / PX_PER_IN
+    slide_h_in = slide_height_px / PX_PER_IN
+    base = mesh_bg.get('baseColor') or (10, 10, 26)
+    overlays: List[Dict[str, Any]] = []
+
+    for layer in mesh_bg.get('layers') or []:
+        rgba = layer.get('color')
+        if not rgba:
+            continue
+        fill_rgb = _composite_rgba_over_bg(rgba, base)
+        cx_in = slide_w_in * float(layer.get('cx_pct', 50.0)) / 100.0
+        cy_in = slide_h_in * float(layer.get('cy_pct', 50.0)) / 100.0
+        radius_pct = max(float(layer.get('radius_pct', 50.0)), 14.0)
+        blob_w_in = max(slide_w_in * radius_pct / 100.0 * 1.72, slide_w_in * 0.42)
+        blob_h_in = max(slide_h_in * radius_pct / 100.0 * 1.44, slide_h_in * 0.34)
+        overlays.append({
+            'type': 'shape',
+            'tag': 'circle',
+            'bounds': {
+                'x': cx_in - blob_w_in / 2.0,
+                'y': cy_in - blob_h_in / 2.0,
+                'width': blob_w_in,
+                'height': blob_h_in,
+            },
+            'styles': {
+                'backgroundColor': f'#{fill_rgb[0]:02X}{fill_rgb[1]:02X}{fill_rgb[2]:02X}',
+                'backgroundImage': '',
+                'border': '',
+                'borderLeft': '',
+                'borderRight': '',
+                'borderTop': '',
+                'borderBottom': '',
+                'borderRadius': '999px',
+                'marginTop': '',
+                'marginBottom': '',
+                'marginLeft': '',
+                'marginRight': '',
+            },
+            '_is_decoration': True,
+            '_skip_layout': True,
+        })
+
+    return overlays
+
+
 def extract_body_decorative_background(
     css_rules: List[CSSRule],
     contract: Optional[Dict[str, Any]] = None,
@@ -8292,6 +8778,8 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
     body_bg = body_style.get('backgroundColor', '')
     body_bi = body_style.get('backgroundImage', '')
     body_grid_bg = extract_body_decorative_background(css_rules, contract)
+    body_mesh_bg = extract_body_mesh_background(body_style, contract)
+    body_mesh_solid = _approximate_aurora_mesh_solid_color(body_mesh_bg)
     global_overlays = _collect_global_positioned_overlays(
         soup,
         css_rules,
@@ -8319,7 +8807,12 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
     slides = []
     for i, slide_html in enumerate(slides_html):
         content_root, layout_info, slide_overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
-        slide_style = compute_element_style(slide_html, css_rules, slide_html.get('style', ''))
+        slide_style = _effective_slide_layout_style(
+            slide_html,
+            css_rules,
+            compute_element_style(slide_html, css_rules, slide_html.get('style', '')),
+            contract,
+        )
 
         bg_info = extract_slide_background(slide_html, css_rules)
         background_solid = bg_info['solid']
@@ -8327,9 +8820,12 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
         grid_bg = bg_info['grid'] or body_grid_bg
 
         if not background_solid and not background_gradient:
-            body_rgb = parse_color(body_bg)
-            if body_rgb:
-                background_solid = body_rgb
+            if body_mesh_solid:
+                background_solid = body_mesh_solid
+            else:
+                body_rgb = parse_color(body_bg)
+                if body_rgb:
+                    background_solid = body_rgb
 
         has_own_chrome = bool(
             slide_html.select('.nav-dots') or
@@ -8419,6 +8915,7 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
             'background': background_solid,
             'bgGradient': background_gradient,
             'gridBg': grid_bg,
+            'meshBg': body_mesh_bg,
             'elements': elements,
             'hasOwnChrome': has_own_chrome,
             'contentMaxWidthPx': content_mw,
@@ -9386,6 +9883,7 @@ def pre_pass_corrections(elements: List[Dict]):
 _FONT_MAP = {
     'Inter':         ('Inter', 'Hiragino Sans GB'),
     'DM Sans':       ('Inter', 'Hiragino Sans GB'),
+    'Space Grotesk': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Clash Display': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Satoshi':       ('Helvetica Neue', 'Hiragino Sans GB'),
     'Archivo Black': ('Arial Black', 'Hiragino Sans GB'),
@@ -9407,6 +9905,7 @@ _FONT_MAP = {
     'Noto Sans SC':     ('Helvetica Neue', 'Hiragino Sans GB'),
     'Noto Sans CJK SC': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Source Han Sans':  ('Helvetica Neue', 'Hiragino Sans GB'),
+    'sans-serif':       ('Helvetica Neue', 'Hiragino Sans GB'),
     'system-ui':        ('Helvetica Neue', 'Hiragino Sans GB'),
     '-apple-system':    ('Helvetica Neue', 'Hiragino Sans GB'),
     'BlinkMacSystemFont': ('Helvetica Neue', 'Hiragino Sans GB'),
@@ -9444,6 +9943,7 @@ _SERIF_LATIN_FONT_KEYS = (
 _LATIN_SAFE_FONT_KEYS = {
     'inter': ('Inter', 'Inter'),
     'dm sans': ('Inter', 'Inter'),
+    'space grotesk': ('Helvetica Neue', 'Helvetica Neue'),
     'clash display': ('Helvetica Neue', 'Helvetica Neue'),
     'satoshi': ('Helvetica Neue', 'Helvetica Neue'),
     'archivo black': ('Arial Black', 'Arial Black'),
@@ -9459,6 +9959,7 @@ _LATIN_SAFE_FONT_KEYS = {
     'helvetica': ('Helvetica Neue', 'Helvetica Neue'),
     'helvetica neue': ('Helvetica Neue', 'Helvetica Neue'),
     'segoe ui': ('Helvetica Neue', 'Helvetica Neue'),
+    'sans-serif': ('Helvetica Neue', 'Helvetica Neue'),
     'system-ui': ('Helvetica Neue', 'Helvetica Neue'),
     '-apple-system': ('Helvetica Neue', 'Helvetica Neue'),
     'blinkmacsystemfont': ('Helvetica Neue', 'Helvetica Neue'),
@@ -10775,6 +11276,60 @@ def add_grid_background(slide, slide_w_in: float, slide_h_in: float,
     buf.seek(0)
     pic = slide.shapes.add_picture(buf, Inches(0), Inches(0),
                                    Inches(slide_w_in), Inches(slide_h_in))
+    sp_tree = slide.shapes._spTree
+    sp_tree.remove(pic._element)
+    sp_tree.insert(2, pic._element)
+
+
+def add_aurora_mesh_background(slide, slide_w_in: float, slide_h_in: float, mesh_bg: Dict[str, Any]):
+    try:
+        from PIL import Image, ImageDraw, ImageFilter
+    except ImportError:
+        return
+
+    base_r, base_g, base_b = mesh_bg.get('baseColor') or (10, 10, 26)
+    layers = mesh_bg.get('layers') or []
+    if not layers:
+        return
+
+    scale = 3
+    w = int(slide_w_in * 96 * scale)
+    h = int(slide_h_in * 96 * scale)
+    img = Image.new('RGBA', (w, h), (base_r, base_g, base_b, 255))
+
+    for layer in layers:
+        rgba = layer.get('color')
+        if not rgba:
+            continue
+        r, g, b, alpha = rgba
+        cx = int(w * float(layer.get('cx_pct', 50.0)) / 100.0)
+        cy = int(h * float(layer.get('cy_pct', 50.0)) / 100.0)
+        radius_pct = max(float(layer.get('radius_pct', 50.0)), 12.0)
+        rx = max(int(w * radius_pct / 100.0 * 0.82), 40)
+        ry = max(int(h * radius_pct / 100.0 * 0.74), 32)
+        blob = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(blob)
+        draw.ellipse(
+            [cx - rx, cy - ry, cx + rx, cy + ry],
+            fill=(r, g, b, int(max(0.0, min(alpha, 1.0)) * 255)),
+        )
+        blur_radius = max(int(min(rx, ry) * 0.34), 18)
+        blob = blob.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        img = Image.alpha_composite(img, blob)
+
+    vignette = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    vignette_draw = ImageDraw.Draw(vignette)
+    vignette_draw.ellipse(
+        [int(-0.12 * w), int(-0.18 * h), int(1.12 * w), int(1.18 * h)],
+        fill=(255, 255, 255, 28),
+    )
+    vignette = vignette.filter(ImageFilter.GaussianBlur(radius=max(int(min(w, h) * 0.025), 18)))
+    img = Image.alpha_composite(img, vignette)
+
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    pic = slide.shapes.add_picture(buf, Inches(0), Inches(0), Inches(slide_w_in), Inches(slide_h_in))
     sp_tree = slide.shapes._spTree
     sp_tree.remove(pic._element)
     sp_tree.insert(2, pic._element)

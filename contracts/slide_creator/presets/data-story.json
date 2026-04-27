@@ -6,9 +6,9 @@
   "contract_version": "1.0.0",
   "producer_version_range": ">=2.14.0 <3.0.0",
   "producer_version_tested": "2.14.0",
-  "contract_source_version": "slide-creator@584abaae0af8",
-  "upstream_commit": "584abaae0af8b4d04aa06d1bb9447f6e3b12f8b5",
-  "generated_at": "2026-04-24",
+  "contract_source_version": "slide-creator@b9fb3d1e569b",
+  "upstream_commit": "b9fb3d1e569ba6dc3129fec20f65885a48a0e3fa",
+  "generated_at": "2026-04-25",
   "source_refs": [
     "references/data-story.md",
     "references/html-template.md"
@@ -16,6 +16,14 @@
   "demo_refs": [
     "demos/data-story-zh.html",
     "demos/data-story-en.html"
+  ],
+  "source_snapshot_refs": [
+    "source_snapshot/references/data-story.md",
+    "source_snapshot/references/html-template.md"
+  ],
+  "demo_snapshot_refs": [
+    "source_snapshot/demos/data-story-zh.html",
+    "source_snapshot/demos/data-story-en.html"
   ],
   "runtime_chrome_selectors": [
     ".progress-bar",
@@ -245,10 +253,13 @@
     "watermark_contains": "By kai-slide-creator v"
   },
   "observed_component_classes": [
+    "badge",
     "chart-axis",
     "chart-grid",
     "chart-label",
     "chart-val",
+    "cta-group",
+    "cta-pill",
     "ds-chart-svg",
     "ds-dot",
     "ds-insight",
@@ -260,8 +271,21 @@
     "ds-split-layout",
     "ds-trend",
     "feat-card",
+    "feat-grid",
+    "feat-stat",
+    "grid-2",
+    "grid-3",
+    "hero-kpi-group",
     "install-cmd",
     "install-label",
-    "install-row"
+    "install-row",
+    "left-panel",
+    "pill",
+    "slide-num-label",
+    "sol-card",
+    "stat",
+    "stat-label",
+    "stat-value",
+    "style-card"
   ]
 }

@@ -67,6 +67,8 @@ validate_export_hints = export_sandbox.validate_export_hints
 detect_producer = export_sandbox.detect_producer
 collect_export_context = export_sandbox.collect_export_context
 extract_body_decorative_background = export_sandbox.extract_body_decorative_background
+extract_body_mesh_background = getattr(export_sandbox, 'extract_body_mesh_background')
+build_aurora_mesh_overlay_elements = getattr(export_sandbox, 'build_aurora_mesh_overlay_elements')
 parse_grid_track_widths = getattr(export_sandbox, '_parse_grid_track_widths')
 from bs4 import BeautifulSoup, Tag
 
@@ -408,17 +410,45 @@ def test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback()
 
 
 def test_slide_creator_contract_manifest_tracks_upstream_and_data_story():
-    """The synced manifest should record upstream versioning and include Data Story."""
+    """The synced manifest should vendor the full slide-creator preset/reference catalog."""
     manifest_path = REPO_ROOT / 'contracts' / 'slide_creator' / 'manifest.json'
     assert manifest_path.exists(), manifest_path
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     assert manifest['producer'] == 'slide-creator', manifest
     assert manifest['upstream_commit'], manifest
+    assert manifest['source_snapshot_root'] == 'source_snapshot', manifest
     slugs = {preset['slug'] for preset in manifest['presets']}
-    assert {'blue-sky', 'enterprise-dark', 'swiss-modern', 'data-story', 'chinese-chan'} <= slugs, manifest
+    assert len(slugs) == 21, slugs
+    assert {'blue-sky', 'enterprise-dark', 'swiss-modern', 'data-story', 'chinese-chan', 'aurora-mesh', 'glassmorphism', 'neo-brutalism', 'modern-newspaper'} <= slugs, manifest
+    assert 'source_snapshot/references/aurora-mesh.md' in manifest['global_reference_snapshot_refs'], manifest
+    assert 'source_snapshot/demos/aurora-mesh-zh.html' in manifest['global_demo_snapshot_refs'], manifest
     data_story = next(preset for preset in manifest['presets'] if preset['slug'] == 'data-story')
     assert data_story['producer_version_tested'] == '2.14.0', data_story
-    print("  PASS: slide-creator manifest tracks upstream commit and data-story")
+    print("  PASS: slide-creator manifest tracks all presets and vendored snapshots")
+
+
+def test_collect_export_context_loads_aurora_mesh_contract_with_snapshots():
+    """Aurora Mesh should load its synced contract, vendored refs, and preset-specific runtime hints."""
+    html_path = REPO_ROOT / 'demo' / 'aurora-mesh-zh.html'
+    if not html_path.exists():
+        print("  SKIP: aurora-mesh contract context (HTML not found)")
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding='utf-8'), 'lxml')
+    context = collect_export_context(html_path, soup)
+    assert context['detection']['producer'] == 'slide-creator', context['detection']
+    assert context['contract'] is not None, context
+    contract = context['contract']
+    assert contract['contract_id'] == 'slide-creator/aurora-mesh', contract
+    assert 'source_snapshot/references/aurora-mesh.md' in contract['source_snapshot_refs'], contract
+    assert 'source_snapshot/demos/aurora-mesh-zh.html' in contract['demo_snapshot_refs'], contract
+    assert '.stat-col' in contract['component_selectors']['stat_card'], contract
+    assert contract['component_slot_models']['stat_card']['layout'] == 'vertical_card', contract
+    assert contract['decorative_layers'][0]['kind'] == 'aurora-mesh', contract
+    assert contract['typography']['display_font_stack'][0] == 'Space Grotesk', contract
+    chrome = context['hints'].get('chrome_selectors') or []
+    assert '.progress-bar' in chrome, chrome
+    print("  PASS: Aurora Mesh loads synced contract and vendored snapshots")
 
 
 def test_sync_slide_creator_contracts_builds_data_story_contract():
@@ -450,6 +480,331 @@ def test_sync_slide_creator_contracts_builds_data_story_contract():
     assert contract['component_slot_models']['feature_card']['bottom_anchor_last_slot'] is False, contract
     assert '.ds-kpi-card' in contract['component_selectors']['metric_card'], contract
     print("  PASS: sync helper builds data-story contract")
+
+
+def test_sync_slide_creator_contracts_builds_aurora_mesh_contract():
+    """Aurora Mesh sync should materialize executable preset hints rather than a metadata shell."""
+    root = Path('/Users/song/projects/slide-creator')
+    if not root.exists():
+        print("  SKIP: sync aurora-mesh contract (repo not found)")
+        return
+
+    manifest = sync_slide_creator_contracts.build_manifest(
+        root,
+        generated_at='2026-04-25',
+        upstream_commit='deadbeef',
+    )
+    aurora_manifest = next(preset for preset in manifest['presets'] if preset['slug'] == 'aurora-mesh')
+    assert aurora_manifest['source_refs'] == ['references/aurora-mesh.md', 'references/html-template.md'], aurora_manifest
+    assert aurora_manifest['source_snapshot_refs'] == ['source_snapshot/references/aurora-mesh.md', 'source_snapshot/references/html-template.md'], aurora_manifest
+    assert aurora_manifest['demo_snapshot_refs'] == ['source_snapshot/demos/aurora-mesh-zh.html', 'source_snapshot/demos/aurora-mesh-en.html'], aurora_manifest
+
+    contract = sync_slide_creator_contracts.build_contract(
+        root,
+        sync_slide_creator_contracts.PRESET_SPECS['aurora-mesh'],
+        generated_at='2026-04-25',
+        upstream_commit='deadbeef',
+    )
+    assert contract['contract_id'] == 'slide-creator/aurora-mesh', contract
+    assert contract['family'] == 'premium-saas-aurora', contract
+    assert contract['source_snapshot_refs'] == ['source_snapshot/references/aurora-mesh.md', 'source_snapshot/references/html-template.md'], contract
+    assert contract['demo_snapshot_refs'] == ['source_snapshot/demos/aurora-mesh-zh.html', 'source_snapshot/demos/aurora-mesh-en.html'], contract
+    assert '.stat-col' in contract['component_selectors']['stat_card'], contract
+    assert '.install-item' in contract['component_selectors']['install_row'], contract
+    assert contract['component_slot_models']['stat_card']['layout'] == 'vertical_card', contract
+    assert contract['component_slot_models']['install_row']['layout'] == 'vertical_card', contract
+    assert contract['decorative_layers'][0]['kind'] == 'aurora-mesh', contract
+    assert contract['typography']['body_font_stack'][0] == 'DM Sans', contract
+    print("  PASS: sync helper builds Aurora Mesh contract with vendored refs")
+
+
+def test_extract_aurora_mesh_background_builds_overlay_shapes():
+    style = {
+        'backgroundColor': '#0a0a1a',
+        'backgroundImage': (
+            'radial-gradient(ellipse at 20% 50%, rgba(120,40,200,0.40) 0%, transparent 60%),'
+            'radial-gradient(ellipse at 80% 20%, rgba(0,180,255,0.30) 0%, transparent 50%),'
+            'radial-gradient(ellipse at 60% 80%, rgba(0,255,180,0.20) 0%, transparent 50%)'
+        ),
+    }
+    contract = {'contract_id': 'slide-creator/aurora-mesh'}
+    mesh = extract_body_mesh_background(style, contract)
+    assert mesh is not None, mesh
+    assert mesh['kind'] == 'aurora-mesh', mesh
+    assert len(mesh['layers']) == 3, mesh
+
+    overlays = build_aurora_mesh_overlay_elements(mesh, 1440, 900)
+    assert len(overlays) == 3, overlays
+    assert all(overlay.get('_is_decoration') for overlay in overlays), overlays
+    assert all(overlay.get('_skip_layout') for overlay in overlays), overlays
+    print("  PASS: Aurora Mesh body background builds overlay shapes")
+
+
+def test_parse_html_to_slides_aurora_uses_solid_base_without_mesh_overlays():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.18.0">
+        <style>
+          body {
+            background-color: #0a0a1a;
+            background-image:
+              radial-gradient(ellipse at 20% 50%, rgba(120,40,200,0.40) 0%, transparent 60%),
+              radial-gradient(ellipse at 80% 20%, rgba(0,180,255,0.30) 0%, transparent 50%),
+              radial-gradient(ellipse at 60% 80%, rgba(0,255,180,0.20) 0%, transparent 50%);
+          }
+          .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+          }
+        </style>
+      </head>
+      <body data-producer="kai-slide-creator" data-preset="Aurora Mesh">
+        <section class="slide"><h1>Hello</h1></section>
+      </body>
+    </html>
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        html_path = Path(tmp_dir) / 'aurora-base-only.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 900)
+
+    assert len(slides) == 1, slides
+    bg = slides[0]['background']
+    assert bg is not None, slides[0]
+    assert bg != (10, 10, 26), bg
+    assert 17 <= bg[0] <= 70, bg
+    assert 16 <= bg[1] <= 75, bg
+    assert 30 <= bg[2] <= 95, bg
+    mesh_shapes = [
+        elem for elem in slides[0]['elements']
+        if elem.get('type') == 'shape' and elem.get('_is_decoration') and elem.get('tag') == 'circle'
+    ]
+    assert not mesh_shapes, mesh_shapes
+    print("  PASS: Aurora slides use an atmospheric solid fallback and skip mesh overlays")
+
+
+def test_parse_html_to_slides_aurora_stat_row_stays_within_slide_width():
+    html_path = REPO_ROOT / 'demo' / 'aurora-mesh-zh.html'
+    if not html_path.exists():
+        print("  SKIP: aurora stat-row layout (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440, 900)
+    slide = slides[3]
+    elements = slide['elements']
+    layout_slide_elements(elements, slide_style=slide.get('slideStyle', {}), slide_data=slide)
+
+    root_container = next(
+        elem for elem in elements
+        if elem.get('type') == 'container' and any(
+            child.get('type') == 'text' and child.get('text') == 'Solution'
+            for child in elem.get('children', [])
+        )
+    )
+    stat_row = next(child for child in root_container.get('children', []) if child.get('type') == 'container')
+    assert stat_row['bounds']['width'] <= 13.33 + 1e-6, stat_row
+    max_right = max(
+        child['bounds']['x'] + child['bounds']['width']
+        for child in stat_row.get('children', [])
+    )
+    assert max_right <= 13.33 + 1e-6, stat_row
+    print("  PASS: Aurora stat-row contract keeps metrics within slide width")
+
+
+def test_parse_html_to_slides_aurora_stat_row_defaults_to_compact_items():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.18.0">
+        <style>
+          body { background: #0a0a1a; color: #fff; }
+          .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+          }
+          .stat-row {
+            display: flex;
+            gap: 64px;
+            justify-content: center;
+            align-items: flex-start;
+          }
+          .stat-col { display: flex; flex-direction: column; align-items: center; }
+          .aurora-stat { font-size: 72px; line-height: 1; font-weight: 700; }
+          .stat-sub { font-size: 15px; margin-top: 8px; }
+        </style>
+      </head>
+      <body data-producer="kai-slide-creator" data-preset="Aurora Mesh">
+        <section class="slide">
+          <div class="stat-row">
+            <div class="stat-col">
+              <span class="aurora-stat">21</span>
+              <span class="stat-sub">预设风格</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">100%</span>
+              <span class="stat-sub">浏览器运行</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">3min</span>
+              <span class="stat-sub">快速出稿</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        html_path = Path(tmp_dir) / 'aurora-compact-stats.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 900)
+
+    slide = slides[0]
+    layout_slide_elements(slide['elements'], slide_style=slide.get('slideStyle', {}), slide_data=slide)
+    row = next(elem for elem in slide['elements'] if elem.get('type') == 'container')
+    cards = [child for child in row.get('children', []) if child.get('type') == 'container']
+    assert len(cards) == 3, cards
+    assert max(card['bounds']['width'] for card in cards) < 2.4, cards
+    span = max(card['bounds']['x'] + card['bounds']['width'] for card in cards) - min(card['bounds']['x'] for card in cards)
+    assert span < 8.0, span
+    print("  PASS: Aurora stat rows default to compact KPI widths")
+
+
+def test_parse_html_to_slides_aurora_stat_row_respects_explicit_stretch_width():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta name="generator" content="slide-creator v2.18.0">
+        <style>
+          body { background: #0a0a1a; color: #fff; }
+          .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+          }
+          .stat-row {
+            display: flex;
+            gap: 24px;
+            justify-content: center;
+            align-items: flex-start;
+            width: min(90vw, 1100px);
+          }
+          .stat-col {
+            display: flex;
+            flex: 1 1 0;
+            flex-direction: column;
+            align-items: center;
+          }
+          .aurora-stat { font-size: 72px; line-height: 1; font-weight: 700; }
+          .stat-sub { font-size: 15px; margin-top: 8px; }
+        </style>
+      </head>
+      <body data-producer="kai-slide-creator" data-preset="Aurora Mesh">
+        <section class="slide">
+          <div class="stat-row">
+            <div class="stat-col">
+              <span class="aurora-stat">21</span>
+              <span class="stat-sub">预设风格</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">100%</span>
+              <span class="stat-sub">浏览器运行</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">3min</span>
+              <span class="stat-sub">快速出稿</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        html_path = Path(tmp_dir) / 'aurora-stretch-stats.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 900)
+
+    slide = slides[0]
+    layout_slide_elements(slide['elements'], slide_style=slide.get('slideStyle', {}), slide_data=slide)
+    row = next(elem for elem in slide['elements'] if elem.get('type') == 'container')
+    cards = [child for child in row.get('children', []) if child.get('type') == 'container']
+    assert len(cards) == 3, cards
+    assert min(card['bounds']['width'] for card in cards) > 2.8, cards
+    print("  PASS: Aurora stat rows honor explicit stretch signals")
+
+
+def test_parse_html_to_slides_aurora_wrapper_style_preserves_centered_layout():
+    html_path = REPO_ROOT / 'demo' / 'aurora-mesh-zh.html'
+    if not html_path.exists():
+        print("  SKIP: aurora wrapper-centered layout (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440, 900)
+    slide = slides[7]
+    slide_style = slide.get('slideStyle', {})
+    assert slide_style.get('justifyContent') == 'center', slide_style
+    assert slide_style.get('alignItems') == 'center', slide_style
+    assert parse_px(slide_style.get('paddingTop', '0px')) >= 64.0, slide_style
+
+    elements = slide['elements']
+    layout_slide_elements(elements, slide_style=slide_style, slide_data=slide)
+    root_container = next(elem for elem in elements if elem.get('type') == 'container')
+    assert 1.8 <= root_container['bounds']['y'] <= 2.4, root_container['bounds']
+    print("  PASS: Aurora wrapper layout keeps CTA content vertically centered")
+
+
+def test_parse_html_to_slides_aurora_install_items_keep_separate_vertical_cards():
+    html_path = REPO_ROOT / 'demo' / 'aurora-mesh-zh.html'
+    if not html_path.exists():
+        print("  SKIP: aurora install rails (HTML not found)")
+        return
+
+    slides = parse_html_to_slides(html_path, 1440, 900)
+    slide = slides[6]
+    layout_slide_elements(slide['elements'], slide_style=slide.get('slideStyle', {}), slide_data=slide)
+
+    def _collect_install_cards(node):
+        found = []
+        slot_model = node.get('_component_slot_model') or {}
+        if (
+            node.get('type') == 'container' and
+            node.get('_component_contract') == 'vertical_card' and
+            slot_model.get('slots') == ['label', 'command']
+        ):
+            found.append(node)
+        for child in node.get('children', []) or []:
+            if child.get('type') == 'container':
+                found.extend(_collect_install_cards(child))
+        return found
+
+    root = next(elem for elem in slide['elements'] if elem.get('type') == 'container')
+    install_cards = _collect_install_cards(root)
+
+    assert len(install_cards) == 2, install_cards
+    card_texts = [
+        tuple(
+            grandchild.get('text')
+            for grandchild in card.get('children', [])
+            if grandchild.get('type') == 'text'
+        )
+        for card in install_cards
+    ]
+    assert any(any('Claude Code' in (text or '') for text in card) for card in card_texts), card_texts
+    assert any(any('OpenClaw' in (text or '') for text in card) for card in card_texts), card_texts
+    print("  PASS: Aurora install slide keeps two separate install cards")
 
 
 def test_sync_slide_creator_contracts_builds_swiss_modern_contract():
@@ -789,6 +1144,190 @@ def test_parse_html_to_slides_swiss_compatible_stat_block_uses_thin_divider_not_
     assert black_shapes, shapes
     assert all(shape['bounds']['width'] < 0.08 for shape in black_shapes), [shape['bounds'] for shape in black_shapes]
     print("  PASS: compatible Swiss stat block uses a thin divider and separated rails")
+
+
+def test_flat_extract_aurora_divider_keeps_explicit_thin_height():
+    """Aurora-style empty divider blocks should export as thin tracks, not 1-inch fallback rectangles."""
+    html = """
+    <html>
+      <head>
+        <style>
+          .aurora-content { max-width: min(90vw, 800px); }
+          .aurora-divider {
+            height: 1px;
+            margin: 16px 0;
+            background: rgba(0,245,196,0.3);
+            border: none;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="aurora-content">
+          <div class="aurora-divider"></div>
+        </div>
+      </body>
+    </html>
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    css_rules = extract_css_from_soup(soup)
+    content = soup.select_one('.aurora-content')
+    content_style = compute_element_style(content, css_rules, content.get('style', ''))
+    elements = flat_extract(
+        content,
+        css_rules,
+        content_style,
+        1440,
+        content_width_px=800.0,
+        local_origin=True,
+    )
+
+    shapes = _collect_elements_by_type(elements, 'shape')
+    assert len(shapes) == 1, shapes
+    divider = shapes[0]
+    assert divider['bounds']['width'] > 7.0, divider['bounds']
+    assert divider['bounds']['height'] < 0.05, divider['bounds']
+    print("  PASS: aurora divider keeps explicit thin height")
+
+
+def test_build_explicit_track_aurora_divider_falls_back_to_slide_inner_width():
+    """Hero dividers without a content wrapper should still resolve to a thin slide-width track."""
+    html = """
+    <html>
+      <head>
+        <style>
+          .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+          }
+          .aurora-divider {
+            height: 1px;
+            margin: 16px 0;
+            background: rgba(0,245,196,0.3);
+            border: none;
+          }
+        </style>
+      </head>
+      <body>
+        <section class="slide">
+          <div class="aurora-divider"></div>
+        </section>
+      </body>
+    </html>
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    css_rules = extract_css_from_soup(soup)
+    divider = soup.select_one('.aurora-divider')
+    divider_style = compute_element_style(divider, css_rules, divider.get('style', ''))
+    shapes = export_sandbox._build_explicit_track_elements(
+        divider,
+        divider_style,
+        css_rules,
+        1440,
+        None,
+    )
+
+    assert shapes is not None, shapes
+    assert len(shapes) == 1, shapes
+    assert shapes[0]['bounds']['width'] > 10.0, shapes[0]['bounds']
+    assert shapes[0]['bounds']['height'] < 0.05, shapes[0]['bounds']
+    print("  PASS: aurora hero divider falls back to slide inner width")
+
+
+def test_parse_html_to_slides_aurora_stats_preserve_separate_metric_tokens():
+    """Aurora metric stacks should keep display numbers separate from labels/copy."""
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta name="generator" content="kai-slide-creator v2.18.0">
+        <style>
+          body {
+            background-color: #0a0a1a;
+            background-image:
+              radial-gradient(ellipse at 20% 50%, rgba(120,40,200,0.40) 0%, transparent 60%),
+              radial-gradient(ellipse at 80% 20%, rgba(0,180,255,0.30) 0%, transparent 50%);
+            color: #fff;
+          }
+          .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+          }
+          .stat-row {
+            display: flex;
+            gap: clamp(3rem, 6vw, 6rem);
+            justify-content: center;
+            align-items: flex-start;
+          }
+          .stat-col {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+          }
+          .aurora-stat {
+            background-image: linear-gradient(135deg, #00f5c4, #00b4ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: clamp(3rem, 10vw, 8rem);
+            font-weight: 700;
+            line-height: 1;
+          }
+          .stat-sub {
+            font-size: clamp(0.75rem, 1.2vw, 1rem);
+            color: rgba(255,255,255,0.45);
+            margin-top: 8px;
+          }
+        </style>
+      </head>
+      <body data-producer="kai-slide-creator" data-preset="Aurora Mesh">
+        <section class="slide">
+          <div class="stat-row">
+            <div class="stat-col">
+              <span class="aurora-stat">21</span>
+              <span class="stat-sub">预设风格</span>
+              <span class="stat-sub">每种都有独立视觉签名</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">100%</span>
+              <span class="stat-sub">浏览器运行</span>
+              <span class="stat-sub">零服务器，零依赖</span>
+            </div>
+            <div class="stat-col">
+              <span class="aurora-stat">3min</span>
+              <span class="stat-sub">快速出稿</span>
+              <span class="stat-sub">从想法到完整演示</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        html_path = Path(tmp_dir) / 'aurora-stats.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 900)
+
+    assert len(slides) == 1, slides
+    texts = _collect_text_values(slides[0]['elements'])
+    for token in ('21', '100%', '3min', '预设风格', '浏览器运行', '快速出稿'):
+        assert token in texts, texts
+    assert not any('21预设风格' in text for text in texts), texts
+    assert not any('100%浏览器运行' in text for text in texts), texts
+
+    metric_texts = [
+        elem for elem in _collect_elements_by_type(slides[0]['elements'], 'text')
+        if elem.get('text') in ('21', '100%', '3min')
+    ]
+    assert len(metric_texts) == 3, metric_texts
+    assert all(elem.get('gradientColors') for elem in metric_texts), metric_texts
+    print("  PASS: aurora stats preserve separate metric tokens")
 
 
 def test_parse_html_to_slides_swiss_canonical_pull_quote_preserves_left_offset_and_top_margin():
@@ -3236,6 +3775,30 @@ def test_build_text_element_boosts_cjk_display_heading_optically():
     print("  PASS: CJK display heading gets optical size boost")
 
 
+def test_build_text_element_skips_optical_boost_for_space_grotesk_display_heading():
+    """Aurora Mesh display headings already author large enough; don't over-boost them."""
+    html = '''
+    <h2 style="font-family:'Space Grotesk', 'Noto Sans SC', sans-serif;
+               font-size:clamp(1.8rem, 4vw, 3.5rem);
+               font-weight:700;line-height:1.1;letter-spacing:-0.02em;">
+      四个核心能力，覆盖完整工作流
+    </h2>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    heading = soup.find('h2')
+    style = compute_element_style(heading, [], heading.get('style', ''))
+    text_ir = build_text_element(heading, style, [], 1440, 900)
+
+    assert text_ir is not None, "Aurora display heading should build into a text element"
+    unboosted_font_px = parse_px(text_ir['styles']['fontSize'])
+    assert 56.0 <= unboosted_font_px <= 58.5, unboosted_font_px
+    assert all(
+        56.0 <= parse_px(seg.get('fontSize', '0px')) <= 58.5
+        for seg in text_ir.get('segments', [])
+    ), text_ir.get('segments')
+    print("  PASS: Space Grotesk display heading keeps authored size")
+
+
 def test_build_grid_children_flex_row_preserves_component_width_and_pairing():
     """Flex-row slotting should respect component width and keep bg/text paired."""
     html = '''
@@ -3333,6 +3896,22 @@ def test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack():
     assert latin_font == 'Inter', (latin_font, ea_font)
     assert ea_font == 'Inter', (latin_font, ea_font)
     print("  PASS: pure Latin labels prefer installed Latin font in mixed stack")
+
+
+def test_map_font_space_grotesk_stack_stays_sans_for_latin_and_cjk():
+    """Space Grotesk stacks should not fall through to serif via the generic sans-serif token."""
+    map_font = _require_symbol('map_font')
+    if map_font is None:
+        return
+
+    latin_font, ea_font = map_font("'Space Grotesk', 'Noto Sans SC', sans-serif", text='slide-creator')
+    assert latin_font == 'Helvetica Neue', (latin_font, ea_font)
+    assert ea_font == 'Helvetica Neue', (latin_font, ea_font)
+
+    latin_font, ea_font = map_font("'Space Grotesk', 'Noto Sans SC', sans-serif", text='一个命令，创建无限可能')
+    assert latin_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    assert ea_font == 'Hiragino Sans GB', (latin_font, ea_font)
+    print("  PASS: Space Grotesk stack stays sans across Latin and CJK text")
 
 
 def _chinese_chan_contract_fixture():
@@ -4937,9 +5516,18 @@ def run_tests():
     test_collect_export_context_loads_data_story_contract_and_body_grid()
     test_collect_export_context_loads_swiss_modern_contract_with_layout_tiers()
     test_slide_creator_chinese_chan_loads_contract_and_runtime_chrome_fallback()
+    test_collect_export_context_loads_aurora_mesh_contract_with_snapshots()
+    test_extract_aurora_mesh_background_builds_overlay_shapes()
+    test_parse_html_to_slides_aurora_uses_solid_base_without_mesh_overlays()
     test_slide_creator_contract_manifest_tracks_upstream_and_data_story()
     test_sync_slide_creator_contracts_builds_data_story_contract()
+    test_sync_slide_creator_contracts_builds_aurora_mesh_contract()
     test_sync_slide_creator_contracts_builds_swiss_modern_contract()
+    test_parse_html_to_slides_aurora_stat_row_stays_within_slide_width()
+    test_parse_html_to_slides_aurora_stat_row_defaults_to_compact_items()
+    test_parse_html_to_slides_aurora_stat_row_respects_explicit_stretch_width()
+    test_parse_html_to_slides_aurora_wrapper_style_preserves_centered_layout()
+    test_parse_html_to_slides_aurora_install_items_keep_separate_vertical_cards()
     test_parse_html_to_slides_swiss_compatible_wrapper_unwraps_and_preserves_two_columns()
     test_media_query_max_height_does_not_override_large_heading_at_default_viewport()
     test_short_latin_inline_block_label_uses_compact_width()
@@ -5045,11 +5633,13 @@ def run_tests():
     test_build_text_element_grouped_inline_badge_keeps_single_line_height()
     test_build_text_element_block_cta_pill_uses_component_layout()
     test_build_text_element_boosts_cjk_display_heading_optically()
+    test_build_text_element_skips_optical_boost_for_space_grotesk_display_heading()
     test_build_grid_children_flex_row_preserves_component_width_and_pairing()
     test_build_grid_children_flex_wrap_centers_rows_without_overflow()
     test_map_font_prefers_stable_ppt_font_over_platform_stack_order()
     test_map_font_platform_only_cjk_stack_falls_back_to_office_safe_font()
     test_map_font_pure_latin_prefers_latin_safe_font_even_in_mixed_stack()
+    test_map_font_space_grotesk_stack_stays_sans_for_latin_and_cjk()
     test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script()
     test_map_font_swiss_display_stack_prefers_archivo_fallback_for_latin()
     test_resolve_text_contract_chinese_chan_preserves_body_breaks()
