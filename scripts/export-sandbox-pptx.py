@@ -9129,27 +9129,142 @@ def build_export_pipeline(
     }
 
 
-def _build_pptx_render_hints(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _derive_pptx_text_render_hint(element: Dict[str, Any]) -> Dict[str, Any]:
+    if element.get('type') != 'text':
+        return {}
+
+    bounds = element.get('bounds', {})
+    styles = element.get('styles', {})
+    segments = element.get('segments', [])
+    font_size_pt = px_to_pt(styles.get('fontSize', '16px'))
+    font_size_px = parse_px(styles.get('fontSize', '16px'))
+    if font_size_px <= 0:
+        font_size_px = 16.0
+
+    if not segments:
+        raw = (element.get('text', '') or '').strip()
+        segments = [{'text': raw, 'color': styles.get('color', '')}]
+
+    lines = segments_to_lines(segments)
+    if not lines:
+        lines = [[{'text': '', 'color': styles.get('color', '')}]]
+
+    explicit_break_heading = (
+        element.get('tag') in ('h1', 'h2', 'h3') and
+        '\n' in (element.get('text', '') or '') and
+        font_size_pt >= 28
+    )
+    preserve_authored_breaks = bool(element.get('preserveAuthoredBreaks'))
+    prefer_wrap_to_preserve_size = bool(element.get('preferWrapToPreserveSize'))
+    display_heading_like = (
+        (
+            element.get('tag') in ('h1', 'h2', 'h3') or
+            element.get('_text_contract_role') == 'title'
+        ) and
+        font_size_pt >= 20 and
+        len(lines) <= 1
+    )
+    display_metric_like = (
+        len(lines) <= 1 and
+        font_size_pt >= 18 and
+        _looks_like_metric_token((element.get('text', '') or '').strip())
+    )
+    single_line_contract_heading = (
+        prefer_wrap_to_preserve_size and
+        display_heading_like and
+        font_size_pt >= 28 and
+        '\n' not in (element.get('text', '') or '') and
+        _can_preserve_single_line_contract_heading(
+            element,
+            font_size_px,
+            bounds.get('width', 0.0),
+            letter_spacing=styles.get('letterSpacing', ''),
+        )
+    )
+    effective_h = max(bounds.get('height', 0.0), element.get('naturalHeight', bounds.get('height', 0.0)))
+    inferred_multiline_prose = (
+        element.get('tag') in ('p', 'div') and
+        not element.get('forceSingleLine') and
+        not element.get('preferNoWrapFit') and
+        '\n' not in (element.get('text', '') or '') and
+        effective_h > _estimate_line_height_in(styles, font_size_pt) * 1.35
+    )
+
+    raw_text = element.get('text', '') or ''
+    wrap_mode = 'square'
+    auto_size = 'shape_to_fit_text'
+    decision = 'multiline_default'
+    if explicit_break_heading:
+        wrap_mode = 'none'
+        auto_size = 'text_to_fit_shape'
+        decision = 'explicit_break_heading'
+    elif single_line_contract_heading:
+        wrap_mode = 'none'
+        auto_size = 'shape_to_fit_text'
+        decision = 'single_line_contract_heading'
+    elif prefer_wrap_to_preserve_size:
+        wrap_mode = 'square'
+        auto_size = 'shape_to_fit_text'
+        decision = 'prefer_wrap_to_preserve_size'
+    elif preserve_authored_breaks:
+        wrap_mode = 'none'
+        auto_size = 'shape_to_fit_text'
+        decision = 'preserve_authored_breaks'
+    elif display_heading_like or display_metric_like:
+        wrap_mode = 'none'
+        auto_size = 'shape_to_fit_text'
+        decision = 'display_heading_or_metric'
+    elif element.get('forceSingleLine'):
+        wrap_mode = 'none'
+        auto_size = 'text_to_fit_shape'
+        decision = 'force_single_line'
+    elif element.get('preferNoWrapFit'):
+        wrap_mode = 'none'
+        auto_size = 'text_to_fit_shape'
+        decision = 'prefer_no_wrap_fit'
+    elif inferred_multiline_prose:
+        wrap_mode = 'square'
+        auto_size = 'shape_to_fit_text'
+        decision = 'inferred_multiline_prose'
+    elif len(lines) <= 1:
+        needs_wrap = len(raw_text) > 20 and bounds.get('width', 0.0) < 5.0
+        if needs_wrap:
+            wrap_mode = 'square'
+            auto_size = 'shape_to_fit_text'
+            decision = 'single_line_needs_wrap'
+        else:
+            wrap_mode = 'none'
+            auto_size = 'text_to_fit_shape'
+            decision = 'single_line_fit'
+
+    return {
+        'wrap_mode': wrap_mode,
+        'auto_size': auto_size,
+        'decision': decision,
+        'preserve_authored_breaks': preserve_authored_breaks,
+        'prefer_wrap_to_preserve_size': prefer_wrap_to_preserve_size,
+        'force_single_line': bool(element.get('forceSingleLine')),
+        'prefer_no_wrap_fit': bool(element.get('preferNoWrapFit')),
+    }
+
+
+def _build_pptx_render_hints(elements: List[Dict[str, Any]], slide_index: int) -> Dict[str, Any]:
     text_hints: Dict[str, Dict[str, Any]] = {}
+    text_counter = 0
 
     def _visit(node_list: List[Dict[str, Any]]) -> None:
+        nonlocal text_counter
         for element in node_list:
             if element.get('type') == 'text':
-                hint: Dict[str, Any] = {}
-                if element.get('preserveAuthoredBreaks'):
-                    hint['wrap'] = False
-                    hint['auto_size'] = 'shape_to_fit_text'
-                    hint['preserve_authored_breaks'] = True
-                elif element.get('preferWrapToPreserveSize'):
-                    hint['wrap'] = True
-                    hint['auto_size'] = 'shape_to_fit_text'
-                    hint['prefer_wrap_to_preserve_size'] = True
-                elif element.get('forceSingleLine'):
-                    hint['wrap'] = False
-                    hint['auto_size'] = 'text_to_fit_shape'
-                    hint['force_single_line'] = True
+                stable_id = f'slide{slide_index}-text-{text_counter}'
+                text_counter += 1
+                element['geometry_id'] = stable_id
+                hint = _derive_pptx_text_render_hint(element)
                 if hint:
-                    text_hints[str(len(text_hints))] = hint
+                    hint = dict(hint)
+                    hint['geometry_id'] = stable_id
+                    element['pptxRenderHint'] = hint
+                    text_hints[stable_id] = hint
             children = element.get('children') or []
             if children:
                 _visit(children)
@@ -9174,6 +9289,8 @@ def _solve_single_slide_geometry(
     css_rules = source_snapshot['css_rules']
     hints = source_snapshot['hints']
     contract = source_snapshot['contract']
+    background_strategy = slide_plan.get('background_strategy', 'source_background')
+    overlay_strategy = slide_plan.get('overlay_strategy', 'source_overlays')
 
     content_root, layout_info, slide_overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
     slide_style = _effective_slide_layout_style(
@@ -9183,18 +9300,24 @@ def _solve_single_slide_geometry(
         contract,
     )
 
-    bg_info = extract_slide_background(slide_html, css_rules)
-    background_solid = bg_info['solid']
-    background_gradient = bg_info['gradient']
-    grid_bg = bg_info['grid'] or body_grid_bg
+    background_solid = None
+    background_gradient = None
+    grid_bg = None
+    mesh_bg = None
+    if background_strategy == 'source_background':
+        bg_info = extract_slide_background(slide_html, css_rules)
+        background_solid = bg_info['solid']
+        background_gradient = bg_info['gradient']
+        grid_bg = bg_info['grid'] or body_grid_bg
+        mesh_bg = body_mesh_bg
 
-    if not background_solid and not background_gradient:
-        if body_mesh_solid:
-            background_solid = body_mesh_solid
-        else:
-            body_rgb = parse_color(body_style.get('backgroundColor', ''))
-            if body_rgb:
-                background_solid = body_rgb
+        if not background_solid and not background_gradient:
+            if body_mesh_solid:
+                background_solid = body_mesh_solid
+            else:
+                body_rgb = parse_color(body_style.get('backgroundColor', ''))
+                if body_rgb:
+                    background_solid = body_rgb
 
     has_own_chrome = bool(
         slide_html.select('.nav-dots') or
@@ -9241,16 +9364,17 @@ def _solve_single_slide_geometry(
         )
 
     slide_overlays: List[Dict[str, Any]] = []
-    for overlay_node in slide_overlay_nodes:
-        slide_overlays.extend(
-            flat_extract(
-                overlay_node,
-                css_rules,
-                slide_style,
-                slide_width_px=width_px,
-                contract=contract,
+    if overlay_strategy == 'source_overlays':
+        for overlay_node in slide_overlay_nodes:
+            slide_overlays.extend(
+                flat_extract(
+                    overlay_node,
+                    css_rules,
+                    slide_style,
+                    slide_width_px=width_px,
+                    contract=contract,
+                )
             )
-        )
 
     if (
         content_root.name == slide_html.name and
@@ -9266,19 +9390,27 @@ def _solve_single_slide_geometry(
         )]
     if slide_overlays:
         elements = slide_overlays + elements
-    if global_overlays:
+    if overlay_strategy == 'source_overlays' and global_overlays:
         elements = [copy.deepcopy(overlay) for overlay in global_overlays] + elements
     _apply_explicit_positions(elements)
 
     slide_index = int(slide_plan.get('slide_index', 0))
     title = get_text_content(slide_html)[:50]
     print(f"  [{slide_index + 1}/{len(source_snapshot['slide_roots'])}] {title}... ({len(elements)} elements)")
+    pptx_render_hints = _build_pptx_render_hints(elements, slide_index)
+    background_payload = {
+        'strategy': background_strategy,
+        'solid': background_solid,
+        'gradient': background_gradient,
+        'grid': grid_bg,
+        'mesh': mesh_bg,
+    }
 
     legacy_slide_data = {
         'background': background_solid,
         'bgGradient': background_gradient,
         'gridBg': grid_bg,
-        'meshBg': body_mesh_bg,
+        'meshBg': mesh_bg,
         'elements': elements,
         'hasOwnChrome': has_own_chrome,
         'contentMaxWidthPx': content_mw,
@@ -9301,9 +9433,21 @@ def _solve_single_slide_geometry(
             'width_in': SLIDE_W_IN,
             'height_in': SLIDE_H_IN,
         },
-        'background': background_solid,
+        'selected_solver': slide_plan.get('selected_solver'),
+        'selected_layout_family': slide_plan.get('selected_layout_family'),
+        'text_policy_bundle': copy.deepcopy(slide_plan.get('text_policy_bundle') or {}),
+        'background_strategy': background_strategy,
+        'overlay_strategy': overlay_strategy,
+        'allowed_overrides': copy.deepcopy(slide_plan.get('allowed_overrides') or []),
+        'downgrade_chain': list(slide_plan.get('downgrade_chain') or []),
+        'reasons': list(slide_plan.get('reasons') or []),
+        'confidence': slide_plan.get('confidence'),
+        'background': background_payload,
+        'bgGradient': background_gradient,
+        'gridBg': grid_bg,
+        'meshBg': mesh_bg,
         'elements': elements,
-        'pptx_render_hints': _build_pptx_render_hints(elements),
+        'pptx_render_hints': pptx_render_hints,
         'legacy_slide_data': legacy_slide_data,
     }
 

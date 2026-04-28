@@ -268,9 +268,29 @@ def test_solve_geometry_emits_pptx_geometry_plan_with_render_hints():
     html_path = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
     pipeline = build_export_pipeline(html_path, 1440, 900)
     geometry_plans = solve_geometry(pipeline)
+    first_plan = geometry_plans[0]
+    source_plan = pipeline['slide_plans'][0]
 
     assert geometry_plans, geometry_plans
-    assert 'pptx_render_hints' in geometry_plans[0], geometry_plans[0]
+    assert first_plan['selected_solver'] == source_plan['selected_solver'], first_plan
+    assert first_plan['selected_layout_family'] == source_plan['selected_layout_family'], first_plan
+    assert first_plan['text_policy_bundle'] == source_plan['text_policy_bundle'], first_plan
+    assert first_plan['background_strategy'] == source_plan['background_strategy'], first_plan
+    assert first_plan['overlay_strategy'] == source_plan['overlay_strategy'], first_plan
+    assert first_plan['allowed_overrides'] == source_plan['allowed_overrides'], first_plan
+    assert first_plan['downgrade_chain'] == source_plan['downgrade_chain'], first_plan
+    assert first_plan['reasons'] == source_plan['reasons'], first_plan
+    assert first_plan['confidence'] == source_plan['confidence'], first_plan
+
+    render_hints = first_plan['pptx_render_hints']
+    assert render_hints['text'], render_hints
+    stable_ids = list(render_hints['text'].keys())
+    assert all(key.startswith('slide0-text-') for key in stable_ids), stable_ids
+    assert any(
+        hint.get('wrap_mode') in {'none', 'square'} and
+        hint.get('auto_size') in {'text_to_fit_shape', 'shape_to_fit_text'}
+        for hint in render_hints['text'].values()
+    ), render_hints
     print("  PASS: solve_geometry emits pptx geometry plan with render hints")
 
 
@@ -278,12 +298,18 @@ def test_solve_geometry_preserves_legacy_slide_fields_for_compat_adapter():
     assert build_export_pipeline is not None, "build_export_pipeline missing"
     assert solve_geometry is not None, "solve_geometry missing"
 
-    html_path = REPO_ROOT / 'demo' / 'blue-sky-zh.html'
+    html_path = REPO_ROOT / 'demo' / 'aurora-mesh-zh.html'
     pipeline = build_export_pipeline(html_path, 1440, 900)
     geometry_plans = solve_geometry(pipeline)
+    first_plan = geometry_plans[0]
 
-    compat_slide = geometry_plans[0]['legacy_slide_data']
+    assert first_plan['background'].get('mesh') or first_plan['background'].get('gradient') or first_plan['background'].get('grid'), first_plan['background']
+
+    compat_slide = first_plan['legacy_slide_data']
     assert 'elements' in compat_slide and 'slideStyle' in compat_slide, compat_slide
+    assert 'background' in compat_slide and 'bgGradient' in compat_slide and 'gridBg' in compat_slide and 'meshBg' in compat_slide, compat_slide
+    compat_slides = parse_html_to_slides(html_path, 1440, 900)
+    assert 'background' in compat_slides[0] and 'bgGradient' in compat_slides[0] and 'gridBg' in compat_slides[0] and 'meshBg' in compat_slides[0], compat_slides[0]
     print("  PASS: solve_geometry preserves legacy slide fields for compat adapter")
 
 
