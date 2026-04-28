@@ -2740,6 +2740,20 @@ def _looks_like_metric_token(text: str) -> bool:
     return False
 
 
+def _is_slide_root_element(element: Optional[Tag]) -> bool:
+    if not isinstance(element, Tag):
+        return False
+    if element.name.lower() != 'section':
+        return False
+    classes = element.get('class') or []
+    return (
+        'slide' in classes or
+        bool(element.get('data-slide')) or
+        bool(element.get('data-page')) or
+        bool(element.get('data-export-role'))
+    )
+
+
 def _is_slide_or_body_anchored_positioned(element: Tag, style: Dict[str, str]) -> bool:
     pos = style.get('position', '').strip()
     if pos not in ('absolute', 'fixed'):
@@ -2757,7 +2771,7 @@ def _is_slide_or_body_anchored_positioned(element: Tag, style: Dict[str, str]) -
         return False
     if parent.name.lower() == 'body':
         return True
-    return parent.name.lower() == 'section' and 'slide' in (parent.get('class') or [])
+    return _is_slide_root_element(parent)
 
 
 def _translate_ir_tree(elem: Dict[str, Any], dx: float, dy: float) -> None:
@@ -2852,7 +2866,7 @@ def _collect_global_positioned_overlays(
     for child in body_tag.children:
         if not isinstance(child, Tag):
             continue
-        if child.name.lower() == 'section' and 'slide' in (child.get('class') or []):
+        if _is_slide_root_element(child):
             continue
         child_style = compute_element_style(child, css_rules, child.get('style', ''), body_style)
         if not _is_slide_or_body_anchored_positioned(child, child_style):
@@ -6275,7 +6289,7 @@ def flat_extract(
     """
     style = compute_element_style(element, css_rules, element.get('style', ''), parent_style)
     tag = element.name.lower()
-    is_slide_root = tag == 'section' and 'slide' in (element.get('class') or [])
+    is_slide_root = _is_slide_root_element(element)
 
     if style.get('display', '') == 'none' or style.get('visibility', '') == 'hidden':
         return []
@@ -8765,11 +8779,7 @@ def discover_slide_roots(soup: BeautifulSoup) -> List[Tag]:
 
     roots: List[Tag] = []
     for child in body.find_all(recursive=False):
-        if not isinstance(child, Tag):
-            continue
-        if child.name.lower() != 'section':
-            continue
-        if child.get('data-slide') or child.get('data-page') or child.get('data-export-role'):
+        if _is_slide_root_element(child):
             roots.append(child)
     return roots
 
@@ -8928,7 +8938,7 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
         # a root-level section shape here is always a duplicate content blocker.
         if (
             content_root.name == slide_html.name and
-            'slide' in (content_root.get('class') or [])
+            _is_slide_root_element(content_root)
         ):
             elements = [e for e in elements if not (
                 e.get('type') == 'shape' and

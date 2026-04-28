@@ -226,6 +226,57 @@ def test_assign_support_tier_uses_deterministic_precedence():
     print("  PASS: support tier precedence is deterministic")
 
 
+def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
+    html = '''
+    <html><body>
+      <section data-slide="1" style="position:relative;padding:48px;">
+        <h2>One</h2>
+        <span style="position:fixed;top:20px;right:32px;font-size:12px;">S1</span>
+      </section>
+      <section data-slide="2" style="position:relative;padding:48px;">
+        <h2>Two</h2>
+        <span style="position:fixed;top:20px;right:32px;font-size:12px;">S2</span>
+      </section>
+    </body></html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-generic-section-roots-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'generic-section-roots.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    assert len(slides) == 2, slides
+    slide1_text = _collect_text_values(slides[0]['elements'])
+    slide2_text = _collect_text_values(slides[1]['elements'])
+    assert 'One' in slide1_text, slide1_text
+    assert 'S1' in slide1_text, slide1_text
+    assert 'Two' not in slide1_text, slide1_text
+    assert 'S2' not in slide1_text, slide1_text
+    assert 'Two' in slide2_text, slide2_text
+    assert 'S2' in slide2_text, slide2_text
+    assert 'One' not in slide2_text, slide2_text
+    assert 'S1' not in slide2_text, slide2_text
+    print("  PASS: generic section roots keep fixed content isolated per slide")
+
+
+def test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections():
+    html = '''
+    <html><body>
+      <section class="slide" data-slide="1"><h2>Explicit</h2></section>
+      <section data-slide="2"><h2>Fallback</h2></section>
+    </body></html>
+    '''
+    with tempfile.TemporaryDirectory(prefix='kai-export-slide-root-precedence-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'slide-root-precedence.html'
+        html_path.write_text(html, encoding='utf-8')
+        slides = parse_html_to_slides(html_path, 1440, 810)
+
+    assert len(slides) == 1, slides
+    slide_text = _collect_text_values(slides[0]['elements'])
+    assert 'Explicit' in slide_text, slide_text
+    assert 'Fallback' not in slide_text, slide_text
+    print("  PASS: explicit .slide roots win over generic section discovery")
+
+
 def test_parse_px():
     """Test CSS pixel parsing utility."""
     assert parse_px('16px') == 16.0
@@ -5565,6 +5616,8 @@ def run_tests():
     test_discover_slide_roots_accepts_generic_section_deck()
     test_discover_slide_roots_rejects_article_like_document()
     test_assign_support_tier_uses_deterministic_precedence()
+    test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
+    test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()
     test_parse_px_supports_minmax_math()
     test_validate_export_hints_rejects_unknown_layout_fields()
