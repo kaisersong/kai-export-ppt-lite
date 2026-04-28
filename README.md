@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.0`
+Current release: `v1.6.1`
 
 ## 中文说明
 
@@ -133,6 +133,14 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.1 更新重点（patch）
+
+- 修复 `_pack_direct_child_content` 不再让 absolute/fixed 子元素污染面板内容宽度
+- 新增 `_build_absolute_decoration_strips`：在 Swiss `column_content` 面板内按授权 CSS 尺寸（`width / left / right / top / bottom`）渲染装饰条
+- `Swiss Modern` canonical 视觉快照：Slide 02 `8.7 → 9.3`、整体 `8.85 → 8.93`
+- `Aurora Mesh` 视觉回归保持 `9.00/10` 不变
+- 回归套件全量通过 `python3 scripts/test-export.py`
 
 ### v1.6.0 更新重点
 
@@ -268,6 +276,14 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.1 Highlights (patch)
+
+- Fixed `_pack_direct_child_content` so absolute/fixed children no longer pollute the panel's measured content width
+- Added `_build_absolute_decoration_strips` to harvest Swiss `column_content` decoration strips with their authored CSS dimensions (`width / left / right / top / bottom`)
+- `Swiss Modern` canonical visual snapshot: Slide 02 `8.7 → 9.3`, overall `8.85 → 8.93`
+- `Aurora Mesh` visual compare unchanged at `9.00/10`
+- Full regression suite passes with `python3 scripts/test-export.py`
 
 ### v1.6.0 Highlights
 

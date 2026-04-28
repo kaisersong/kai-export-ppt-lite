@@ -3431,6 +3431,11 @@ def _pack_direct_child_content(
     packed_children: List[Dict[str, Any]] = []
     for child in _direct_tag_children(node):
         child_style = compute_element_style(child, css_rules, child.get('style', ''), node_style)
+        # Skip absolute-positioned children: they should not contribute to the
+        # packed container's width. Callers (e.g. column_content builder) are
+        # expected to harvest decoration strips separately.
+        if child_style.get('position', '').strip() in ('absolute', 'fixed'):
+            continue
         built = flat_extract(
             child,
             css_rules,
@@ -3538,7 +3543,75 @@ def _build_swiss_column_content(
     right_container['bounds']['x'] = left_w_in
     right_container['bounds']['y'] = right_y
     root['children'].append(right_container)
+
+    # Harvest absolute-positioned decoration strips inside each panel
+    # (e.g. .red-bar). They were skipped by _pack_direct_child_content so
+    # they would not pollute the panel's content width.
+    for panel_node, panel_w_in, panel_x_in in (
+        (left_node, left_w_in, 0.0),
+        (right_node, right_w_in, left_w_in),
+    ):
+        for strip in _build_absolute_decoration_strips(
+            panel_node, css_rules, slide_style, panel_w_in, root_h_in
+        ):
+            strip['bounds']['x'] += panel_x_in
+            root['children'].append(strip)
     return [root]
+
+
+def _build_absolute_decoration_strips(
+    panel_node: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Dict[str, str],
+    panel_w_in: float,
+    panel_h_in: float,
+) -> List[Dict[str, Any]]:
+    panel_style = compute_element_style(panel_node, css_rules, panel_node.get('style', ''), parent_style)
+    strips: List[Dict[str, Any]] = []
+    for child in _direct_tag_children(panel_node):
+        cs = compute_element_style(child, css_rules, child.get('style', ''), panel_style)
+        if cs.get('position', '').strip() not in ('absolute', 'fixed'):
+            continue
+        bg = cs.get('backgroundColor', '').strip()
+        if not bg or bg in ('transparent', 'rgba(0, 0, 0, 0)'):
+            continue
+        text_inside = (child.get_text(strip=True) or '').strip()
+        if text_inside:
+            continue  # only handle pure decoration strips
+        def _side(name: str) -> Optional[float]:
+            raw = cs.get(name, '').strip()
+            if not raw or raw == 'auto':
+                return None
+            return parse_px(raw) / PX_PER_IN
+        left_in, right_in = _side('left'), _side('right')
+        top_in, bottom_in = _side('top'), _side('bottom')
+        w_raw = cs.get('width', '').strip()
+        h_raw = cs.get('height', '').strip()
+        explicit_w = parse_px(w_raw) / PX_PER_IN if w_raw and 'px' in w_raw else None
+        explicit_h = parse_px(h_raw) / PX_PER_IN if h_raw and 'px' in h_raw else None
+        # width: explicit > (left & right) > skip
+        if explicit_w is not None:
+            w = explicit_w
+        elif left_in is not None and right_in is not None:
+            w = max(panel_w_in - left_in - right_in, 0.0)
+        else:
+            continue
+        # height: explicit > (top & bottom) > skip
+        if explicit_h is not None:
+            h = explicit_h
+        elif top_in is not None and bottom_in is not None:
+            h = max(panel_h_in - top_in - bottom_in, 0.0)
+        else:
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        x = left_in if left_in is not None else max(panel_w_in - (right_in or 0.0) - w, 0.0)
+        y = top_in if top_in is not None else max(panel_h_in - (bottom_in or 0.0) - h, 0.0)
+        shape = build_shape_element(child, cs, panel_w_in * PX_PER_IN)
+        shape['bounds'] = {'x': x, 'y': y, 'width': w, 'height': h}
+        shape['_is_decoration'] = True
+        strips.append(shape)
+    return strips
 
 
 def _build_swiss_stat_block(

@@ -1,5 +1,40 @@
 # Release Notes
 
+## v1.6.1 - 2026-04-29
+
+This patch fixes a real `Swiss Modern` `column_content` rendering bug surfaced while pushing canonical Swiss fidelity: an absolute-positioned decoration strip (e.g. `.red-bar`) was inheriting the panel's full content width, both blowing up the strip itself and polluting the parent container's measured width.
+
+本次补丁修掉一条 `Swiss Modern` `column_content` 真实渲染 bug：在推进 canonical Swiss 视觉保真过程中暴露出，绝对定位的装饰条（例如 `.red-bar`）会继承面板的全部内容宽度，既把装饰条本身放大，也污染了父容器的测量宽度。
+
+### Highlights
+
+- Fixed `_pack_direct_child_content` to skip absolute/fixed children so they no longer pollute the panel's measured content width
+- Added `_build_absolute_decoration_strips` to harvest absolute decoration strips inside Swiss `column_content` panels and render them with their authored CSS dimensions (`width / left / right / top / bottom`)
+- `Swiss Modern` canonical visual snapshot:
+  - Slide 02 `8.7 → 9.3` (`+0.6`)
+  - Overall `8.85 → 8.93`
+- `Aurora Mesh` regression unchanged at `9.00/10`
+- Full regression suite still passes: `python3 scripts/test-export.py`
+
+### Validation Snapshot
+
+Validated with:
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py scripts/sync-slide-creator-contracts.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
+Result:
+
+- Full regression suite: `All tests passed!`
+- `Swiss Modern` canonical fixture (`demo/swiss-canonical-zh.html`): overall `8.93/10`, slide 02 `9.3/10`
+- `Aurora Mesh`: overall `9.00/10` (unchanged)
+
 ## v1.6.0 - 2026-04-28
 
 This release has two main bodies of work. First, the export pipeline is restructured into explicit, contract-bound stages (`analyze → profile → slide plan → geometry plan → render`), so each stage is independently testable and the runtime stops mixing extraction, planning, and rendering on a single pass. Second, `Aurora Mesh` finishes its current optimization pass and reaches a real `9.00/10` visual compare snapshot.
