@@ -8800,11 +8800,13 @@ def _assign_support_tier(signals: Dict[str, Any]) -> str:
     return 'generic_safe'
 
 
-def _build_global_downgrade_chain(support_tier: str) -> List[str]:
-    tiers = ['contract_bound', 'producer_aware', 'semantic_enhanced', 'generic_safe']
-    if support_tier not in tiers:
-        return ['generic_safe']
-    return tiers[tiers.index(support_tier):]
+def _build_global_downgrade_chain() -> List[str]:
+    return [
+        'preserve_structure',
+        'preserve_grouping',
+        'degrade_decorative',
+        'shrink_if_allowed',
+    ]
 
 
 def _collect_semantic_deck_signals(slide_roots: List[Tag]) -> List[str]:
@@ -8822,6 +8824,19 @@ def _collect_semantic_deck_signals(slide_roots: List[Tag]) -> List[str]:
     return signals
 
 
+def _count_authored_slide_anchored_children(
+    slide_html: Tag,
+    css_rules: List[CSSRule],
+) -> int:
+    slide_style = compute_element_style(slide_html, css_rules, slide_html.get('style', ''))
+    count = 0
+    for child in _direct_tag_children(slide_html):
+        child_style = compute_element_style(child, css_rules, child.get('style', ''), slide_style)
+        if _is_slide_or_body_anchored_positioned(child, child_style):
+            count += 1
+    return count
+
+
 def _collect_slide_raw_signals(
     slide_html: Tag,
     slide_index: int,
@@ -8829,14 +8844,14 @@ def _collect_slide_raw_signals(
     contract: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     layout_info = _classify_slide_layout(slide_html, contract)
-    content_root, _prepared_layout_info, overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
-    text_nodes = content_root.find_all(TEXT_TAGS)
-    headings = content_root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-    paragraphs = content_root.find_all(['p', 'li'])
-    images = content_root.find_all(['img', 'svg', 'canvas'])
-    tables = content_root.find_all('table')
-    card_like = content_root.select('.card, [class*="card"]')
-    text_values = [txt.strip() for txt in content_root.stripped_strings if txt.strip()]
+    text_nodes = slide_html.find_all(TEXT_TAGS)
+    headings = slide_html.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    paragraphs = slide_html.find_all(['p', 'li'])
+    images = slide_html.find_all(['img', 'svg', 'canvas'])
+    tables = slide_html.find_all('table')
+    card_like = slide_html.select('.card, [class*="card"]')
+    text_values = [txt.strip() for txt in slide_html.stripped_strings if txt.strip()]
+    overlay_count = _count_authored_slide_anchored_children(slide_html, css_rules)
 
     component_signals: List[str] = []
     if card_like:
@@ -8855,7 +8870,7 @@ def _collect_slide_raw_signals(
         text_signals.append('long_copy')
 
     overlay_signals: List[str] = []
-    if overlay_nodes:
+    if overlay_count:
         overlay_signals.append('slide_anchored')
 
     return {
@@ -8865,12 +8880,13 @@ def _collect_slide_raw_signals(
         'role': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
         'intent': slide_html.get('data-export-intent', ''),
         'layout_support_tier': layout_info.get('support_tier', ''),
+        'contract_found': bool(contract),
         'text_count': len(text_nodes),
         'heading_count': len(headings),
         'paragraph_count': len(paragraphs),
         'image_count': len(images),
         'table_count': len(tables),
-        'overlay_count': len(overlay_nodes),
+        'overlay_count': overlay_count,
         'component_signals': component_signals,
         'text_signals': text_signals,
         'overlay_signals': overlay_signals,
@@ -8937,6 +8953,28 @@ def analyze_source(html_path: Path, width_px: float = 1440, height_px: float = 8
     }
 
 
+def _support_tier_rank(support_tier: str) -> int:
+    order = {
+        'generic_safe': 0,
+        'semantic_enhanced': 1,
+        'producer_aware': 2,
+        'contract_bound': 3,
+    }
+    return order.get(support_tier, 0)
+
+
+def _cap_support_tier(local_tier: str, deck_tier: str) -> str:
+    return local_tier if _support_tier_rank(local_tier) <= _support_tier_rank(deck_tier) else deck_tier
+
+
+def _assign_slide_support_tier(raw_slide: Dict[str, Any]) -> str:
+    if raw_slide.get('contract_found'):
+        return 'contract_bound'
+    if raw_slide.get('semantic_signals', 0) >= 2 and raw_slide.get('text_count', 0) > 0:
+        return 'semantic_enhanced'
+    return 'generic_safe'
+
+
 def build_profiles(analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Stage 2: derive descriptive deck/slide profiles from raw signals."""
     source_snapshot = analysis.get('source_snapshot') or {}
@@ -8954,7 +8992,7 @@ def build_profiles(analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[
         'preset': hints.get('preset', ''),
         'deck_family': hints.get('deck_family', ''),
         'contract': contract,
-        'global_downgrade_chain': _build_global_downgrade_chain(support_tier),
+        'global_downgrade_chain': _build_global_downgrade_chain(),
         'validation': export_context.get('validation'),
     }
 
@@ -8965,17 +9003,13 @@ def build_profiles(analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[
             override_candidates.append({'type': 'role', 'value': raw_slide['role']})
         if raw_slide.get('intent'):
             override_candidates.append({'type': 'intent', 'value': raw_slide['intent']})
-        if raw_slide.get('layout_support_tier'):
-            override_candidates.append({
-                'type': 'layout_support_tier',
-                'value': raw_slide['layout_support_tier'],
-            })
+        slide_support_tier = _cap_support_tier(_assign_slide_support_tier(raw_slide), support_tier)
 
         slide_profiles.append({
             'slide_index': raw_slide.get('slide_index', 0),
             'role': raw_slide.get('role', ''),
             'intent': raw_slide.get('intent', ''),
-            'support_tier': support_tier,
+            'support_tier': slide_support_tier,
             'component_profiles': list(raw_slide.get('component_signals') or []),
             'text_profiles': list(raw_slide.get('text_signals') or []),
             'overlay_profiles': list(raw_slide.get('overlay_signals') or []),

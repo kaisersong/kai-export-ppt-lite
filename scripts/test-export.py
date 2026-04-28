@@ -245,7 +245,18 @@ def test_build_profiles_assigns_contract_bound_deck_profile():
     deck_profile, slide_profiles = build_profiles(analysis)
 
     assert deck_profile['support_tier'] == 'contract_bound', deck_profile
+    assert deck_profile['global_downgrade_chain'] == [
+        'preserve_structure',
+        'preserve_grouping',
+        'degrade_decorative',
+        'shrink_if_allowed',
+    ], deck_profile
     assert slide_profiles and slide_profiles[0]['slide_index'] == 0, slide_profiles
+    assert slide_profiles[0]['support_tier'] == 'contract_bound', slide_profiles[0]
+    assert all(
+        candidate.get('type') != 'layout_support_tier'
+        for candidate in slide_profiles[0]['override_candidates']
+    ), slide_profiles[0]['override_candidates']
     print("  PASS: build_profiles assigns contract-bound deck profile")
 
 
@@ -266,7 +277,34 @@ def test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck():
     deck_profile, _slide_profiles = build_profiles(analysis)
 
     assert deck_profile['support_tier'] == 'semantic_enhanced', deck_profile
+    assert _slide_profiles and _slide_profiles[0]['support_tier'] == 'semantic_enhanced', _slide_profiles
     print("  PASS: build_profiles assigns semantic_enhanced for generic section deck")
+
+
+def test_analyze_source_raw_slide_signals_describe_authored_slide():
+    analyze_source = _require_symbol('analyze_source')
+    html = """
+    <html><body>
+      <section data-slide="1" data-export-intent="compare">
+        <div class="wrapper">
+          <h2>One</h2>
+          <p>Alpha body copy for authored analysis.</p>
+        </div>
+        <span style="position:absolute;top:12px;right:12px;">Badge</span>
+      </section>
+    </body></html>
+    """
+    with tempfile.TemporaryDirectory(prefix='kai-export-raw-slide-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'authored-slide-signals.html'
+        html_path.write_text(html, encoding='utf-8')
+        analysis = analyze_source(html_path, 1440, 900)
+
+    raw_slide = analysis['raw_slide_signals'][0]
+
+    assert raw_slide['overlay_count'] == 1, raw_slide
+    assert 'Badge' in raw_slide['text_preview'], raw_slide
+    assert raw_slide['intent'] == 'compare', raw_slide
+    print("  PASS: analyze_source raw slide signals stay authored-source based")
 
 
 def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
@@ -5662,6 +5700,7 @@ def run_tests():
     test_analyze_source_returns_raw_signal_bundles()
     test_build_profiles_assigns_contract_bound_deck_profile()
     test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
+    test_analyze_source_raw_slide_signals_describe_authored_slide()
     test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
     test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()
