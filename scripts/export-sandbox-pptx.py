@@ -9023,10 +9023,106 @@ def build_profiles(analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[
     return deck_profile, slide_profiles
 
 
-def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
-    """Parse an HTML file into a list of slide data dicts."""
+def _describe_override_candidate(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        candidate_type = str(candidate.get('type', '')).strip()
+        candidate_value = str(candidate.get('value', '')).strip()
+        if candidate_type and candidate_value:
+            return f'{candidate_type}:{candidate_value}'
+        if candidate_value:
+            return candidate_value
+        if candidate_type:
+            return candidate_type
+    if candidate is None:
+        return ''
+    return str(candidate).strip()
+
+
+def _build_text_policy_bundle(deck_profile: Dict[str, Any], slide_profile: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'deck_support_tier': deck_profile.get('support_tier', 'generic_safe'),
+        'slide_support_tier': slide_profile.get('support_tier', 'generic_safe'),
+        'text_profiles': list(slide_profile.get('text_profiles') or []),
+        'policy_mode': 'freeze_major_text_groups',
+    }
+
+
+def plan_slides(
+    deck_profile: Dict[str, Any],
+    slide_profiles: List[Dict[str, Any]],
+    width_px: float,
+    height_px: float,
+) -> List[Dict[str, Any]]:
+    """Stage 3: choose solver and planning policies without emitting geometry."""
+    _ = (width_px, height_px)
+    deck_support_tier = deck_profile.get('support_tier', 'generic_safe')
+    downgrade_chain = list(deck_profile.get('global_downgrade_chain') or [])
+    slide_plans: List[Dict[str, Any]] = []
+
+    for slide_profile in slide_profiles:
+        support_tier = _cap_support_tier(slide_profile.get('support_tier', 'generic_safe'), deck_support_tier)
+        role = str(slide_profile.get('role', '')).strip()
+        selected_layout_family = role if support_tier == 'contract_bound' and role else ''
+
+        if support_tier == 'contract_bound' and role:
+            selected_solver = 'contract_role'
+        elif support_tier == 'producer_aware':
+            selected_solver = 'producer_flow'
+        elif support_tier == 'semantic_enhanced':
+            selected_solver = 'semantic_flow'
+        else:
+            selected_solver = 'generic_flow'
+
+        reasons = [f'support_tier:{support_tier}', f'solver:{selected_solver}']
+        if selected_layout_family:
+            reasons.append(f'layout_family:{selected_layout_family}')
+        for candidate in slide_profile.get('override_candidates') or []:
+            normalized_candidate = _describe_override_candidate(candidate)
+            if normalized_candidate:
+                reasons.append(f'override_allowed:{normalized_candidate}')
+        for downgrade in downgrade_chain:
+            reasons.append(f'downgrade_allowed:{downgrade}')
+
+        slide_plans.append({
+            'slide_index': slide_profile.get('slide_index', 0),
+            'support_tier': support_tier,
+            'selected_solver': selected_solver,
+            'selected_layout_family': selected_layout_family,
+            'selected_component_plans': list(slide_profile.get('component_profiles') or []),
+            'text_policy_bundle': _build_text_policy_bundle(deck_profile, slide_profile),
+            'background_strategy': 'source_background',
+            'overlay_strategy': 'source_overlays',
+            'allowed_overrides': list(slide_profile.get('override_candidates') or []),
+            'downgrade_chain': downgrade_chain,
+            'confidence': slide_profile.get('confidence', 'medium'),
+            'reasons': reasons,
+        })
+
+    return slide_plans
+
+
+def build_export_pipeline(
+    html_path: Path,
+    width_px: float = 1440,
+    height_px: float = 900,
+) -> Dict[str, Any]:
     analysis = analyze_source(html_path, width_px, height_px)
     deck_profile, slide_profiles = build_profiles(analysis)
+    slide_plans = plan_slides(deck_profile, slide_profiles, width_px, height_px)
+    return {
+        'analysis': analysis,
+        'deck_profile': deck_profile,
+        'slide_profiles': slide_profiles,
+        'slide_plans': slide_plans,
+    }
+
+
+def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
+    """Parse an HTML file into a list of slide data dicts."""
+    pipeline = build_export_pipeline(html_path, width_px, height_px)
+    analysis = pipeline['analysis']
+    deck_profile = pipeline['deck_profile']
+    slide_profiles = pipeline['slide_profiles']
     source_snapshot = analysis['source_snapshot']
     soup = source_snapshot['soup']
     export_context = source_snapshot['export_context']

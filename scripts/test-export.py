@@ -344,6 +344,54 @@ def test_build_profiles_does_not_overstate_slide_contract_bound_without_local_ev
     print("  PASS: slide profiles require local evidence before claiming contract_bound")
 
 
+def test_plan_slides_does_not_promote_past_analysis_tier():
+    plan_slides = _require_symbol('plan_slides')
+    deck_profile = {
+        'support_tier': 'semantic_enhanced',
+        'global_downgrade_chain': ['preserve_structure', 'degrade_decorative'],
+    }
+    slide_profiles = [{
+        'slide_index': 0,
+        'role': '',
+        'intent': 'compare',
+        'support_tier': 'semantic_enhanced',
+        'component_profiles': [{'type': 'text_block', 'value': 'summary'}],
+        'text_profiles': [{'type': 'heading', 'selector': 'h1'}],
+        'overlay_profiles': [],
+        'override_candidates': [],
+    }]
+
+    plans = plan_slides(deck_profile, slide_profiles, 1440, 900)
+
+    assert plans[0]['support_tier'] == 'semantic_enhanced', plans[0]
+    print("  PASS: plan_slides does not promote past analysis tier")
+
+
+def test_plan_slides_records_override_reasons_for_export_role():
+    plan_slides = _require_symbol('plan_slides')
+    deck_profile = {
+        'support_tier': 'contract_bound',
+        'global_downgrade_chain': ['preserve_structure', 'preserve_grouping'],
+    }
+    slide_profiles = [{
+        'slide_index': 0,
+        'role': 'title_grid',
+        'intent': 'hero',
+        'support_tier': 'contract_bound',
+        'component_profiles': [{'type': 'hero', 'value': 'title'}],
+        'text_profiles': [{'type': 'heading', 'selector': 'h1'}],
+        'overlay_profiles': [{'type': 'badge'}],
+        'override_candidates': [{'type': 'role', 'value': 'explicit_role_hint'}],
+    }]
+
+    plans = plan_slides(deck_profile, slide_profiles, 1440, 900)
+
+    assert plans[0]['selected_layout_family'], plans[0]
+    assert plans[0]['reasons'], plans[0]
+    assert any('explicit_role_hint' in reason for reason in plans[0]['reasons']), plans[0]['reasons']
+    print("  PASS: plan_slides records override reasons for export role")
+
+
 def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
     html = '''
     <html><body>
@@ -5739,6 +5787,8 @@ def run_tests():
     test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
     test_analyze_source_raw_slide_signals_describe_authored_slide()
     test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence()
+    test_plan_slides_does_not_promote_past_analysis_tier()
+    test_plan_slides_records_override_reasons_for_export_role()
     test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
     test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()
