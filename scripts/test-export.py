@@ -226,6 +226,49 @@ def test_assign_support_tier_uses_deterministic_precedence():
     print("  PASS: support tier precedence is deterministic")
 
 
+def test_analyze_source_returns_raw_signal_bundles():
+    analyze_source = _require_symbol('analyze_source')
+    html_path = REPO_ROOT / 'demo' / 'slide-creator-intro.html'
+    analysis = analyze_source(html_path, 1440, 900)
+
+    assert {'source_snapshot', 'raw_deck_signals', 'raw_slide_signals'} <= set(analysis), analysis
+    assert analysis['raw_deck_signals']['page_boundary_count'] >= 1, analysis['raw_deck_signals']
+    print("  PASS: analyze_source returns raw signal bundles")
+
+
+def test_build_profiles_assigns_contract_bound_deck_profile():
+    analyze_source = _require_symbol('analyze_source')
+    build_profiles = _require_symbol('build_profiles')
+    html_path = REPO_ROOT / 'demo' / 'data-story-zh.html'
+    analysis = analyze_source(html_path, 1440, 900)
+
+    deck_profile, slide_profiles = build_profiles(analysis)
+
+    assert deck_profile['support_tier'] == 'contract_bound', deck_profile
+    assert slide_profiles and slide_profiles[0]['slide_index'] == 0, slide_profiles
+    print("  PASS: build_profiles assigns contract-bound deck profile")
+
+
+def test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck():
+    analyze_source = _require_symbol('analyze_source')
+    build_profiles = _require_symbol('build_profiles')
+    html = """
+    <html><body>
+      <section data-slide="1"><div class="card"><h2>One</h2><p>Alpha</p></div></section>
+      <section data-slide="2"><div class="card"><h2>Two</h2><p>Beta</p></div></section>
+    </body></html>
+    """
+    with tempfile.TemporaryDirectory(prefix='kai-export-analysis-stage-') as tmp_dir:
+        html_path = Path(tmp_dir) / 'generic-section-deck.html'
+        html_path.write_text(html, encoding='utf-8')
+        analysis = analyze_source(html_path, 1440, 900)
+
+    deck_profile, _slide_profiles = build_profiles(analysis)
+
+    assert deck_profile['support_tier'] == 'semantic_enhanced', deck_profile
+    print("  PASS: build_profiles assigns semantic_enhanced for generic section deck")
+
+
 def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
     html = '''
     <html><body>
@@ -5616,6 +5659,9 @@ def run_tests():
     test_discover_slide_roots_accepts_generic_section_deck()
     test_discover_slide_roots_rejects_article_like_document()
     test_assign_support_tier_uses_deterministic_precedence()
+    test_analyze_source_returns_raw_signal_bundles()
+    test_build_profiles_assigns_contract_bound_deck_profile()
+    test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
     test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
     test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()

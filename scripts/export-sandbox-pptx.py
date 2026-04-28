@@ -8800,8 +8800,87 @@ def _assign_support_tier(signals: Dict[str, Any]) -> str:
     return 'generic_safe'
 
 
-def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
-    """Parse an HTML file into a list of slide data dicts."""
+def _build_global_downgrade_chain(support_tier: str) -> List[str]:
+    tiers = ['contract_bound', 'producer_aware', 'semantic_enhanced', 'generic_safe']
+    if support_tier not in tiers:
+        return ['generic_safe']
+    return tiers[tiers.index(support_tier):]
+
+
+def _collect_semantic_deck_signals(slide_roots: List[Tag]) -> List[str]:
+    signals: List[str] = []
+    if slide_roots:
+        signals.append('slide_roots')
+    if any(root.name == 'section' for root in slide_roots):
+        signals.append('section_roots')
+    if any(root.get('data-slide') is not None for root in slide_roots):
+        signals.append('data_slide_markers')
+    if any(root.find(['h1', 'h2', 'h3']) for root in slide_roots):
+        signals.append('headings_present')
+    if any(root.select_one('.card, [class*="card"]') for root in slide_roots):
+        signals.append('card_like_content')
+    return signals
+
+
+def _collect_slide_raw_signals(
+    slide_html: Tag,
+    slide_index: int,
+    css_rules: List[CSSRule],
+    contract: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    layout_info = _classify_slide_layout(slide_html, contract)
+    content_root, _prepared_layout_info, overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
+    text_nodes = content_root.find_all(TEXT_TAGS)
+    headings = content_root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    paragraphs = content_root.find_all(['p', 'li'])
+    images = content_root.find_all(['img', 'svg', 'canvas'])
+    tables = content_root.find_all('table')
+    card_like = content_root.select('.card, [class*="card"]')
+    text_values = [txt.strip() for txt in content_root.stripped_strings if txt.strip()]
+
+    component_signals: List[str] = []
+    if card_like:
+        component_signals.append('card_like')
+    if images:
+        component_signals.append('visual_media')
+    if tables:
+        component_signals.append('table')
+
+    text_signals: List[str] = []
+    if headings:
+        text_signals.append('headings')
+    if paragraphs:
+        text_signals.append('body_copy')
+    if any(len(text) >= 80 for text in text_values):
+        text_signals.append('long_copy')
+
+    overlay_signals: List[str] = []
+    if overlay_nodes:
+        overlay_signals.append('slide_anchored')
+
+    return {
+        'slide_index': slide_index,
+        'root_tag': slide_html.name,
+        'root_classes': list(slide_html.get('class', [])),
+        'role': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
+        'intent': slide_html.get('data-export-intent', ''),
+        'layout_support_tier': layout_info.get('support_tier', ''),
+        'text_count': len(text_nodes),
+        'heading_count': len(headings),
+        'paragraph_count': len(paragraphs),
+        'image_count': len(images),
+        'table_count': len(tables),
+        'overlay_count': len(overlay_nodes),
+        'component_signals': component_signals,
+        'text_signals': text_signals,
+        'overlay_signals': overlay_signals,
+        'semantic_signals': len(component_signals) + len(text_signals) + len(overlay_signals),
+        'text_preview': text_values[:5],
+    }
+
+
+def analyze_source(html_path: Path, width_px: float = 1440, height_px: float = 810) -> Dict[str, Any]:
+    """Stage 1: collect source snapshot and raw descriptive signals."""
     with open(html_path, 'r', encoding='utf-8') as f:
         html_content = f.read()
 
@@ -8809,11 +8888,113 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
     export_context = collect_export_context(html_path, soup)
     hints = export_context.get('hints') or {}
     contract = export_context.get('contract')
+
     chrome_selectors = hints.get('chrome_selectors') or []
     if chrome_selectors:
         _prune_runtime_chrome(soup, chrome_selectors)
 
     css_rules = extract_css_from_soup(soup)
+    slide_roots = discover_slide_roots(soup)
+    detection = export_context.get('detection') or {}
+    producer_signals = (
+        len(detection.get('strong_signals') or [])
+        + len(detection.get('medium_channels') or [])
+        + len(detection.get('weak_signals') or [])
+    )
+    semantic_signal_labels = _collect_semantic_deck_signals(slide_roots)
+
+    raw_deck_signals = {
+        'producer': detection.get('producer') or hints.get('producer'),
+        'producer_confidence': detection.get('confidence', 'none'),
+        'contract_found': bool(contract),
+        'producer_signals': producer_signals,
+        'page_boundary_count': len(slide_roots),
+        'semantic_signals': len(semantic_signal_labels),
+        'semantic_signal_labels': semantic_signal_labels,
+    }
+    raw_slide_signals = [
+        _collect_slide_raw_signals(slide_html, index, css_rules, contract)
+        for index, slide_html in enumerate(slide_roots)
+    ]
+
+    source_snapshot = {
+        'html_path': html_path,
+        'width_px': width_px,
+        'height_px': height_px,
+        'html_content': html_content,
+        'soup': soup,
+        'css_rules': css_rules,
+        'slide_roots': slide_roots,
+        'export_context': export_context,
+        'hints': hints,
+        'contract': contract,
+    }
+
+    return {
+        'source_snapshot': source_snapshot,
+        'raw_deck_signals': raw_deck_signals,
+        'raw_slide_signals': raw_slide_signals,
+    }
+
+
+def build_profiles(analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Stage 2: derive descriptive deck/slide profiles from raw signals."""
+    source_snapshot = analysis.get('source_snapshot') or {}
+    export_context = source_snapshot.get('export_context') or {}
+    hints = source_snapshot.get('hints') or {}
+    contract = source_snapshot.get('contract')
+    raw_deck = analysis.get('raw_deck_signals') or {}
+    raw_slide_signals = analysis.get('raw_slide_signals') or []
+
+    support_tier = _assign_support_tier(raw_deck)
+    deck_profile = {
+        'producer': raw_deck.get('producer'),
+        'producer_confidence': raw_deck.get('producer_confidence', 'none'),
+        'support_tier': support_tier,
+        'preset': hints.get('preset', ''),
+        'deck_family': hints.get('deck_family', ''),
+        'contract': contract,
+        'global_downgrade_chain': _build_global_downgrade_chain(support_tier),
+        'validation': export_context.get('validation'),
+    }
+
+    slide_profiles: List[Dict[str, Any]] = []
+    for raw_slide in raw_slide_signals:
+        override_candidates = []
+        if raw_slide.get('role'):
+            override_candidates.append({'type': 'role', 'value': raw_slide['role']})
+        if raw_slide.get('intent'):
+            override_candidates.append({'type': 'intent', 'value': raw_slide['intent']})
+        if raw_slide.get('layout_support_tier'):
+            override_candidates.append({
+                'type': 'layout_support_tier',
+                'value': raw_slide['layout_support_tier'],
+            })
+
+        slide_profiles.append({
+            'slide_index': raw_slide.get('slide_index', 0),
+            'role': raw_slide.get('role', ''),
+            'intent': raw_slide.get('intent', ''),
+            'support_tier': support_tier,
+            'component_profiles': list(raw_slide.get('component_signals') or []),
+            'text_profiles': list(raw_slide.get('text_signals') or []),
+            'overlay_profiles': list(raw_slide.get('overlay_signals') or []),
+            'override_candidates': override_candidates,
+        })
+
+    return deck_profile, slide_profiles
+
+
+def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
+    """Parse an HTML file into a list of slide data dicts."""
+    analysis = analyze_source(html_path, width_px, height_px)
+    deck_profile, slide_profiles = build_profiles(analysis)
+    source_snapshot = analysis['source_snapshot']
+    soup = source_snapshot['soup']
+    export_context = source_snapshot['export_context']
+    hints = source_snapshot['hints']
+    contract = source_snapshot['contract']
+    css_rules = source_snapshot['css_rules']
 
     # Check body background
     body_style_str = ''
@@ -8843,7 +9024,7 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
                     'backgroundImage': body_bi
                 }))
 
-    slides_html = discover_slide_roots(soup)
+    slides_html = source_snapshot['slide_roots']
     if not slides_html:
         print("No slide roots found in HTML.")
         return []
@@ -8966,8 +9147,8 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
             'hasOwnChrome': has_own_chrome,
             'contentMaxWidthPx': content_mw,
             'legacyBlueSkyOffsets': 'blue-sky' in html_path.stem,
-            'producer': export_context.get('detection', {}).get('producer'),
-            'producerConfidence': export_context.get('detection', {}).get('confidence'),
+            'producer': deck_profile.get('producer'),
+            'producerConfidence': deck_profile.get('producer_confidence'),
             'exportHints': hints,
             'contractId': contract.get('contract_id') if contract else None,
             'exportRole': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
