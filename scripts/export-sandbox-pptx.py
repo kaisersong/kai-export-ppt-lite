@@ -9047,6 +9047,13 @@ def _build_text_policy_bundle(deck_profile: Dict[str, Any], slide_profile: Dict[
     }
 
 
+def _clone_override_candidates(override_candidates: List[Any]) -> List[Any]:
+    cloned_candidates: List[Any] = []
+    for candidate in override_candidates or []:
+        cloned_candidates.append(dict(candidate) if isinstance(candidate, dict) else candidate)
+    return cloned_candidates
+
+
 def plan_slides(
     deck_profile: Dict[str, Any],
     slide_profiles: List[Dict[str, Any]],
@@ -9056,13 +9063,16 @@ def plan_slides(
     """Stage 3: choose solver and planning policies without emitting geometry."""
     _ = (width_px, height_px)
     deck_support_tier = deck_profile.get('support_tier', 'generic_safe')
-    downgrade_chain = list(deck_profile.get('global_downgrade_chain') or [])
+    deck_family = str(deck_profile.get('deck_family', '')).strip()
+    global_downgrade_chain = list(deck_profile.get('global_downgrade_chain') or [])
     slide_plans: List[Dict[str, Any]] = []
 
     for slide_profile in slide_profiles:
         support_tier = _cap_support_tier(slide_profile.get('support_tier', 'generic_safe'), deck_support_tier)
         role = str(slide_profile.get('role', '')).strip()
-        selected_layout_family = role if support_tier == 'contract_bound' and role else ''
+        selected_layout_family = deck_family
+        downgrade_chain = list(global_downgrade_chain)
+        allowed_overrides = _clone_override_candidates(slide_profile.get('override_candidates') or [])
 
         if support_tier == 'contract_bound' and role:
             selected_solver = 'contract_role'
@@ -9076,7 +9086,9 @@ def plan_slides(
         reasons = [f'support_tier:{support_tier}', f'solver:{selected_solver}']
         if selected_layout_family:
             reasons.append(f'layout_family:{selected_layout_family}')
-        for candidate in slide_profile.get('override_candidates') or []:
+        if role:
+            reasons.append(f'role:{role}')
+        for candidate in allowed_overrides:
             normalized_candidate = _describe_override_candidate(candidate)
             if normalized_candidate:
                 reasons.append(f'override_allowed:{normalized_candidate}')
@@ -9092,7 +9104,7 @@ def plan_slides(
             'text_policy_bundle': _build_text_policy_bundle(deck_profile, slide_profile),
             'background_strategy': 'source_background',
             'overlay_strategy': 'source_overlays',
-            'allowed_overrides': list(slide_profile.get('override_candidates') or []),
+            'allowed_overrides': allowed_overrides,
             'downgrade_chain': downgrade_chain,
             'confidence': slide_profile.get('confidence', 'medium'),
             'reasons': reasons,

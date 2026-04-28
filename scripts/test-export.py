@@ -371,8 +371,10 @@ def test_plan_slides_records_override_reasons_for_export_role():
     plan_slides = _require_symbol('plan_slides')
     deck_profile = {
         'support_tier': 'contract_bound',
+        'deck_family': 'enterprise-dark',
         'global_downgrade_chain': ['preserve_structure', 'preserve_grouping'],
     }
+    override_candidate = {'type': 'role', 'value': 'explicit_role_hint'}
     slide_profiles = [{
         'slide_index': 0,
         'role': 'title_grid',
@@ -381,15 +383,57 @@ def test_plan_slides_records_override_reasons_for_export_role():
         'component_profiles': [{'type': 'hero', 'value': 'title'}],
         'text_profiles': [{'type': 'heading', 'selector': 'h1'}],
         'overlay_profiles': [{'type': 'badge'}],
-        'override_candidates': [{'type': 'role', 'value': 'explicit_role_hint'}],
+        'override_candidates': [override_candidate],
     }]
 
     plans = plan_slides(deck_profile, slide_profiles, 1440, 900)
 
-    assert plans[0]['selected_layout_family'], plans[0]
+    assert plans[0]['selected_layout_family'] == 'enterprise-dark', plans[0]
     assert plans[0]['reasons'], plans[0]
     assert any('explicit_role_hint' in reason for reason in plans[0]['reasons']), plans[0]['reasons']
+    assert plans[0]['allowed_overrides'][0] is not override_candidate, plans[0]['allowed_overrides']
     print("  PASS: plan_slides records override reasons for export role")
+
+
+def test_plan_slides_isolates_downgrade_chain_per_plan():
+    plan_slides = _require_symbol('plan_slides')
+    global_downgrade_chain = ['preserve_structure', 'degrade_decorative']
+    deck_profile = {
+        'support_tier': 'semantic_enhanced',
+        'global_downgrade_chain': global_downgrade_chain,
+    }
+    slide_profiles = [
+        {
+            'slide_index': 0,
+            'role': '',
+            'intent': '',
+            'support_tier': 'semantic_enhanced',
+            'component_profiles': [],
+            'text_profiles': [],
+            'overlay_profiles': [],
+            'override_candidates': [],
+        },
+        {
+            'slide_index': 1,
+            'role': '',
+            'intent': '',
+            'support_tier': 'semantic_enhanced',
+            'component_profiles': [],
+            'text_profiles': [],
+            'overlay_profiles': [],
+            'override_candidates': [],
+        },
+    ]
+
+    plans = plan_slides(deck_profile, slide_profiles, 1440, 900)
+
+    assert plans[0]['downgrade_chain'] is not global_downgrade_chain, plans[0]
+    assert plans[1]['downgrade_chain'] is not global_downgrade_chain, plans[1]
+    assert plans[0]['downgrade_chain'] is not plans[1]['downgrade_chain'], plans
+    plans[0]['downgrade_chain'].append('only_first_plan')
+    assert deck_profile['global_downgrade_chain'] == ['preserve_structure', 'degrade_decorative'], deck_profile
+    assert plans[1]['downgrade_chain'] == ['preserve_structure', 'degrade_decorative'], plans[1]
+    print("  PASS: plan_slides isolates downgrade chain per plan")
 
 
 def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
@@ -5789,6 +5833,7 @@ def run_tests():
     test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence()
     test_plan_slides_does_not_promote_past_analysis_tier()
     test_plan_slides_records_override_reasons_for_export_role()
+    test_plan_slides_isolates_downgrade_chain_per_plan()
     test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
     test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()
