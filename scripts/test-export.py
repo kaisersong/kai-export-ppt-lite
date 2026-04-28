@@ -64,6 +64,7 @@ except AttributeError:
 parse_html_to_slides = export_sandbox.parse_html_to_slides
 build_export_pipeline = getattr(export_sandbox, 'build_export_pipeline', None)
 solve_geometry = getattr(export_sandbox, 'solve_geometry', None)
+render_pptx = getattr(export_sandbox, 'render_pptx', None)
 export_sandbox_pptx = export_sandbox.export_sandbox
 validate_export_hints = export_sandbox.validate_export_hints
 detect_producer = export_sandbox.detect_producer
@@ -311,6 +312,38 @@ def test_solve_geometry_preserves_legacy_slide_fields_for_compat_adapter():
     compat_slides = parse_html_to_slides(html_path, 1440, 900)
     assert 'background' in compat_slides[0] and 'bgGradient' in compat_slides[0] and 'gridBg' in compat_slides[0] and 'meshBg' in compat_slides[0], compat_slides[0]
     print("  PASS: solve_geometry preserves legacy slide fields for compat adapter")
+
+
+def test_render_pptx_uses_geometry_render_hints_for_contract_wrap():
+    assert build_export_pipeline is not None, "build_export_pipeline missing"
+    assert solve_geometry is not None, "solve_geometry missing"
+    assert render_pptx is not None, "render_pptx missing"
+
+    html_path = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
+    pipeline = build_export_pipeline(html_path, 1440, 900)
+    geometry_plans = solve_geometry(pipeline)
+    first_plan = geometry_plans[0]
+    wrap_hint = next(
+        (
+            hint for hint in first_plan['pptx_render_hints']['text'].values()
+            if hint.get('wrap_mode') == 'square'
+        ),
+        None,
+    )
+
+    assert wrap_hint is not None, first_plan['pptx_render_hints']
+
+    with tempfile.TemporaryDirectory(prefix='kai-export-render-hints-') as tmp_dir:
+        pptx_path = Path(tmp_dir) / 'render-hints.pptx'
+        render_pptx(geometry_plans, pptx_path)
+
+        with ZipFile(pptx_path) as archive:
+            slide_xml = archive.read('ppt/slides/slide1.xml').decode('utf-8')
+
+    expected_geometry_id = wrap_hint['geometry_id']
+    assert expected_geometry_id in slide_xml, slide_xml
+    assert 'wrap="square"' in slide_xml, slide_xml
+    print("  PASS: render_pptx uses geometry render hints for contract wrap")
 
 
 def test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck():
@@ -5885,6 +5918,7 @@ def run_tests():
     test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
     test_solve_geometry_emits_pptx_geometry_plan_with_render_hints()
     test_solve_geometry_preserves_legacy_slide_fields_for_compat_adapter()
+    test_render_pptx_uses_geometry_render_hints_for_contract_wrap()
     test_analyze_source_raw_slide_signals_describe_authored_slide()
     test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence()
     test_plan_slides_does_not_promote_past_analysis_tier()

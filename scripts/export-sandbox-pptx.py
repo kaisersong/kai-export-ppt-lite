@@ -9427,6 +9427,7 @@ def _solve_single_slide_geometry(
 
     return {
         'slide_index': slide_index,
+        'source_html_path': str(source_snapshot['html_path']),
         'slide_size': {
             'width_px': width_px,
             'height_px': height_px,
@@ -11339,7 +11340,16 @@ def export_text_element(slide, elem, bg_color=None):
         Inches(b['x']), Inches(b['y']),
         Inches(b['width']), Inches(effective_h)
     )
+    geometry_id = elem.get('geometry_id')
+    if geometry_id:
+        try:
+            txBox.name = geometry_id
+        except Exception:
+            pass
     tf = txBox.text_frame
+    render_hint = elem.get('pptxRenderHint') or {}
+    hinted_wrap_mode = render_hint.get('wrap_mode')
+    hinted_auto_size = render_hint.get('auto_size')
     explicit_break_heading = (
         elem.get('tag') in ('h1', 'h2', 'h3') and
         '\n' in (elem.get('text', '') or '') and
@@ -11382,7 +11392,15 @@ def export_text_element(slide, elem, bg_color=None):
     # Match golden: single-line text uses TEXT_TO_FIT_SHAPE with no wrap,
     # multi-line text uses SHAPE_TO_FIT_TEXT with wrap
     from pptx.enum.text import MSO_AUTO_SIZE
-    if explicit_break_heading:
+    auto_size_by_hint = {
+        'text_to_fit_shape': MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+        'shape_to_fit_text': MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT,
+        'none': MSO_AUTO_SIZE.NONE,
+    }
+    if hinted_wrap_mode in {'none', 'square'} and hinted_auto_size in auto_size_by_hint:
+        tf.word_wrap = hinted_wrap_mode == 'square'
+        tf.auto_size = auto_size_by_hint[hinted_auto_size]
+    elif explicit_break_heading:
         # Explicit <br> in large centered headings should remain the only line
         # breaks. Let the heading keep its authored line structure instead of
         # allowing PowerPoint to wrap again on the last word/character.
@@ -11480,6 +11498,17 @@ def export_text_element(slide, elem, bg_color=None):
             apply_run(run, seg['text'], color, seg_font_size_pt, seg_weight, text_transform,
                       font_family=seg_font_family, letter_spacing=seg_letter_spacing,
                       strike=seg.get('strike', False))
+
+
+def _bind_geometry_render_hints(elements: List[Dict[str, Any]], text_hints: Dict[str, Dict[str, Any]]) -> None:
+    for elem in elements:
+        if elem.get('type') == 'text':
+            geometry_id = elem.get('geometry_id')
+            if geometry_id and geometry_id in text_hints and not elem.get('pptxRenderHint'):
+                elem['pptxRenderHint'] = copy.deepcopy(text_hints[geometry_id])
+        children = elem.get('children') or []
+        if children:
+            _bind_geometry_render_hints(children, text_hints)
 
 
 def _export_inline_fragment_runway(slide, fragments, bounds, cell_styles, render_text_fragments: bool = True):
@@ -11798,6 +11827,103 @@ def _render_layout_element(slide, elem, html_dir: Path, slide_bg):
         export_text_element(slide, elem, slide_bg)
 
 
+def _apply_geometry_plan_background(pptx_slide, geometry_plan: Dict[str, Any], slide_w_in: float, slide_h_in: float) -> None:
+    background_payload = geometry_plan.get('background') or {}
+    background_solid = background_payload.get('solid')
+    background_gradient = background_payload.get('gradient')
+    grid_bg = background_payload.get('grid')
+
+    if background_gradient:
+        c1, c2 = background_gradient
+        try:
+            fill = pptx_slide.background.fill
+            fill.gradient()
+            fill.gradient_angle = 135.0
+            stops = fill.gradient_stops
+            stops[0].position = 0.0
+            stops[0].color.rgb = RGBColor(*c1)
+            stops[1].position = 1.0
+            stops[1].color.rgb = RGBColor(*c2)
+        except Exception:
+            if background_solid:
+                pptx_slide.background.fill.solid()
+                pptx_slide.background.fill.fore_color.rgb = RGBColor(*background_solid)
+    elif background_solid:
+        pptx_slide.background.fill.solid()
+        pptx_slide.background.fill.fore_color.rgb = RGBColor(*background_solid)
+
+    if grid_bg:
+        add_grid_background(
+            pptx_slide,
+            slide_w_in,
+            slide_h_in,
+            grid_bg['color'],
+            grid_bg['sizePx'],
+        )
+
+
+def _render_geometry_plan(prs, geometry_plan: Dict[str, Any], slide_count: int, add_chrome: bool = False):
+    blank_layout = prs.slide_layouts[6]
+    pptx_slide = prs.slides.add_slide(blank_layout)
+    slide_size = geometry_plan.get('slide_size') or {}
+    slide_w_in = float(slide_size.get('width_in') or SLIDE_W_IN)
+    slide_h_in = float(slide_size.get('height_in') or SLIDE_H_IN)
+    legacy_slide = geometry_plan.get('legacy_slide_data') or {}
+    html_dir = Path(geometry_plan.get('source_html_path') or '.').resolve().parent
+
+    _apply_geometry_plan_background(pptx_slide, geometry_plan, slide_w_in, slide_h_in)
+
+    elements = copy.deepcopy(geometry_plan.get('elements') or legacy_slide.get('elements') or [])
+    text_hints = ((geometry_plan.get('pptx_render_hints') or {}).get('text') or {})
+    if text_hints:
+        _bind_geometry_render_hints(elements, text_hints)
+
+    pre_pass_corrections(elements)
+    slide_style = legacy_slide.get('slideStyle', {})
+    slide_data = copy.deepcopy(legacy_slide) if legacy_slide else {}
+    slide_index = int(geometry_plan.get('slide_index', len(prs.slides) - 1))
+    slide_data['_slide_index'] = slide_index
+    layout_slide_elements(elements, slide_w_in, slide_h_in, slide_style, slide_data)
+
+    for elem in elements:
+        if elem.get('type') == 'container':
+            for child in elem.get('children', []):
+                if child['bounds']['x'] < slide_w_in and child['bounds']['width'] > slide_w_in - child['bounds']['x']:
+                    child['bounds']['width'] = slide_w_in - child['bounds']['x']
+        elif elem['bounds']['x'] < slide_w_in and elem['bounds']['width'] > slide_w_in - elem['bounds']['x']:
+            elem['bounds']['width'] = slide_w_in - elem['bounds']['x']
+
+    slide_bg = (geometry_plan.get('background') or {}).get('solid')
+    if slide_bg is None:
+        slide_bg = (geometry_plan.get('background') or {}).get('gradient', [None])[0]
+    if slide_bg is None:
+        slide_bg = (legacy_slide.get('background') if legacy_slide else None)
+    if slide_bg is None:
+        slide_bg = (255, 255, 255)
+
+    for elem in elements:
+        try:
+            _render_layout_element(pptx_slide, elem, html_dir, slide_bg)
+        except Exception as e:
+            print(f"    警告: {e}")
+
+    if add_chrome and not legacy_slide.get('hasOwnChrome'):
+        add_slide_chrome(pptx_slide, slide_index, slide_count, slide_w_in, slide_h_in)
+
+
+def render_pptx(geometry_plans: List[Dict[str, Any]], output_path: Path, add_chrome: bool = False) -> Path:
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(8.33)
+
+    for geometry_plan in geometry_plans:
+        _render_geometry_plan(prs, geometry_plan, len(geometry_plans), add_chrome=add_chrome)
+
+    output_path = Path(output_path)
+    prs.save(str(output_path))
+    return output_path
+
+
 def add_slide_chrome(slide, slide_idx: int, slide_count: int,
                      slide_w_in: float, slide_h_in: float, px_per_in: float = 108.0):
     counter_x = 36 / px_per_in
@@ -12058,95 +12184,17 @@ def export_sandbox(html_path, output_path=None, width=1440, height=900, add_chro
         sys.exit(1)
 
     output_path = Path(output_path) if output_path else html_path.with_suffix('.pptx')
-    html_dir = html_path.parent
 
     print(f"导出（sandbox, no browser）: {html_path.name}")
 
-    # Parse HTML → slide data
-    slides = parse_html_to_slides(html_path, width, height)
-    if not slides:
+    pipeline = build_export_pipeline(html_path, width, height)
+    geometry_plans = solve_geometry(pipeline)
+    if not geometry_plans:
         print("Nothing to export.")
         return
 
-    # Create PPTX
-    prs = Presentation()
-    prs.slide_width = Inches(13.33)
-    prs.slide_height = Inches(8.33)  # 16:10 (matches golden)
-    blank_layout = prs.slide_layouts[6]
-    slide_w_in = 13.33
-    slide_h_in = 8.33
-
-    for i, slide_data in enumerate(slides):
-        slide_data['_slide_index'] = i
-        pptx_slide = prs.slides.add_slide(blank_layout)
-
-        # Background
-        if slide_data['bgGradient']:
-            c1, c2 = slide_data['bgGradient']
-            try:
-                from pptx.oxml.ns import qn
-                fill = pptx_slide.background.fill
-                fill.gradient()
-                fill.gradient_angle = 135.0
-                stops = fill.gradient_stops
-                stops[0].position = 0.0
-                stops[0].color.rgb = RGBColor(*c1)
-                stops[1].position = 1.0
-                stops[1].color.rgb = RGBColor(*c2)
-            except Exception:
-                if slide_data['background']:
-                    pptx_slide.background.fill.solid()
-                    pptx_slide.background.fill.fore_color.rgb = RGBColor(*slide_data['background'])
-        elif slide_data['background']:
-            r, g, b = slide_data['background']
-            pptx_slide.background.fill.solid()
-            pptx_slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
-
-        # Grid background
-        if slide_data['gridBg']:
-            add_grid_background(pptx_slide, slide_w_in, slide_h_in,
-                                slide_data['gridBg']['color'], slide_data['gridBg']['sizePx'])
-
-        # Pre-pass corrections
-        elements = slide_data['elements']
-        pre_pass_corrections(elements)
-
-        # Compute slide style for vertical centering detection
-        slide_element_style = slide_data.get('slideStyle', {})
-
-        # Layout elements
-        slide_data['_slide_index'] = i
-        layout_slide_elements(elements, slide_w_in, slide_h_in, slide_element_style, slide_data)
-
-        # Clamp widths
-        for elem in elements:
-            if elem.get('type') == 'container':
-                for child in elem.get('children', []):
-                    if child['bounds']['x'] < slide_w_in and child['bounds']['width'] > slide_w_in - child['bounds']['x']:
-                        child['bounds']['width'] = slide_w_in - child['bounds']['x']
-            elif elem['bounds']['x'] < slide_w_in and elem['bounds']['width'] > slide_w_in - elem['bounds']['x']:
-                elem['bounds']['width'] = slide_w_in - elem['bounds']['x']
-
-        # Determine alpha compositing background: solid color, or first gradient stop
-        _slide_bg = slide_data['background']
-        if _slide_bg is None and slide_data.get('bgGradient'):
-            _slide_bg = slide_data['bgGradient'][0]  # use first gradient stop
-        if _slide_bg is None:
-            _slide_bg = (255, 255, 255)
-
-        # Render elements
-        for elem in elements:
-            try:
-                _render_layout_element(pptx_slide, elem, html_dir, _slide_bg)
-            except Exception as e:
-                print(f"    警告: {e}")
-
-        # Chrome
-        if add_chrome and not slide_data['hasOwnChrome']:
-            add_slide_chrome(pptx_slide, i, len(slides), slide_w_in, slide_h_in)
-
-    prs.save(str(output_path))
-    print(f"Saved: {output_path}  ({len(slides)} 张幻灯片)")
+    render_pptx(geometry_plans, output_path, add_chrome=add_chrome)
+    print(f"Saved: {output_path}  ({len(geometry_plans)} 张幻灯片)")
 
     # Preview
     preview_path = generate_preview_from_pptx(output_path)
