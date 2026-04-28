@@ -9129,27 +9129,200 @@ def build_export_pipeline(
     }
 
 
-def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
-    """Parse an HTML file into a list of slide data dicts."""
-    pipeline = build_export_pipeline(html_path, width_px, height_px)
-    analysis = pipeline['analysis']
-    deck_profile = pipeline['deck_profile']
-    slide_profiles = pipeline['slide_profiles']
-    source_snapshot = analysis['source_snapshot']
-    soup = source_snapshot['soup']
-    export_context = source_snapshot['export_context']
+def _build_pptx_render_hints(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
+    text_hints: Dict[str, Dict[str, Any]] = {}
+
+    def _visit(node_list: List[Dict[str, Any]]) -> None:
+        for element in node_list:
+            if element.get('type') == 'text':
+                hint: Dict[str, Any] = {}
+                if element.get('preserveAuthoredBreaks'):
+                    hint['wrap'] = False
+                    hint['auto_size'] = 'shape_to_fit_text'
+                    hint['preserve_authored_breaks'] = True
+                elif element.get('preferWrapToPreserveSize'):
+                    hint['wrap'] = True
+                    hint['auto_size'] = 'shape_to_fit_text'
+                    hint['prefer_wrap_to_preserve_size'] = True
+                elif element.get('forceSingleLine'):
+                    hint['wrap'] = False
+                    hint['auto_size'] = 'text_to_fit_shape'
+                    hint['force_single_line'] = True
+                if hint:
+                    text_hints[str(len(text_hints))] = hint
+            children = element.get('children') or []
+            if children:
+                _visit(children)
+
+    _visit(elements)
+    return {'text': text_hints}
+
+
+def _solve_single_slide_geometry(
+    slide_plan: Dict[str, Any],
+    slide_html: Tag,
+    source_snapshot: Dict[str, Any],
+    deck_profile: Dict[str, Any],
+    body_style: Dict[str, Any],
+    body_grid_bg: Optional[Dict[str, Any]],
+    body_mesh_bg: Optional[Dict[str, Any]],
+    body_mesh_solid: Optional[Tuple[int, int, int]],
+    global_overlays: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    width_px = source_snapshot['width_px']
+    height_px = source_snapshot['height_px']
+    css_rules = source_snapshot['css_rules']
     hints = source_snapshot['hints']
     contract = source_snapshot['contract']
-    css_rules = source_snapshot['css_rules']
 
-    # Check body background
+    content_root, layout_info, slide_overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
+    slide_style = _effective_slide_layout_style(
+        slide_html,
+        css_rules,
+        compute_element_style(slide_html, css_rules, slide_html.get('style', '')),
+        contract,
+    )
+
+    bg_info = extract_slide_background(slide_html, css_rules)
+    background_solid = bg_info['solid']
+    background_gradient = bg_info['gradient']
+    grid_bg = bg_info['grid'] or body_grid_bg
+
+    if not background_solid and not background_gradient:
+        if body_mesh_solid:
+            background_solid = body_mesh_solid
+        else:
+            body_rgb = parse_color(body_style.get('backgroundColor', ''))
+            if body_rgb:
+                background_solid = body_rgb
+
+    has_own_chrome = bool(
+        slide_html.select('.nav-dots') or
+        slide_html.select('.slide-counter') or
+        slide_html.select('.page-counter')
+    )
+
+    content_mw = None
+    cr_style = compute_element_style(content_root, css_rules, content_root.get('style', ''))
+    cr_maxw = cr_style.get('maxWidth', '')
+    if cr_maxw and 'px' in cr_maxw:
+        content_mw = parse_px(cr_maxw)
+
+    if content_mw is None and content_root is slide_html:
+        for child in content_root.children:
+            if not isinstance(child, Tag):
+                continue
+            child_style = compute_element_style(child, css_rules, child.get('style', ''))
+            if child_style.get('position', '') == 'absolute':
+                continue
+            child_maxw = child_style.get('maxWidth', '')
+            if child_maxw and 'px' in child_maxw:
+                content_mw = parse_px(child_maxw)
+                break
+
+    custom_elements = _build_swiss_role_elements(
+        content_root,
+        css_rules,
+        width_px,
+        height_px,
+        contract,
+        layout_info,
+    )
+    if custom_elements is not None:
+        elements = custom_elements
+    else:
+        elements = flat_extract(
+            content_root,
+            css_rules,
+            body_style,
+            slide_width_px=width_px,
+            content_width_px=content_mw,
+            contract=contract,
+        )
+
+    slide_overlays: List[Dict[str, Any]] = []
+    for overlay_node in slide_overlay_nodes:
+        slide_overlays.extend(
+            flat_extract(
+                overlay_node,
+                css_rules,
+                slide_style,
+                slide_width_px=width_px,
+                contract=contract,
+            )
+        )
+
+    if (
+        content_root.name == slide_html.name and
+        _is_slide_root_element(content_root)
+    ):
+        elements = [e for e in elements if not (
+            e.get('type') == 'shape' and
+            e.get('tag') == content_root.name and
+            (
+                e.get('styles', {}).get('backgroundImage', '') or
+                e.get('styles', {}).get('backgroundColor', '')
+            )
+        )]
+    if slide_overlays:
+        elements = slide_overlays + elements
+    if global_overlays:
+        elements = [copy.deepcopy(overlay) for overlay in global_overlays] + elements
+    _apply_explicit_positions(elements)
+
+    slide_index = int(slide_plan.get('slide_index', 0))
+    title = get_text_content(slide_html)[:50]
+    print(f"  [{slide_index + 1}/{len(source_snapshot['slide_roots'])}] {title}... ({len(elements)} elements)")
+
+    legacy_slide_data = {
+        'background': background_solid,
+        'bgGradient': background_gradient,
+        'gridBg': grid_bg,
+        'meshBg': body_mesh_bg,
+        'elements': elements,
+        'hasOwnChrome': has_own_chrome,
+        'contentMaxWidthPx': content_mw,
+        'legacyBlueSkyOffsets': 'blue-sky' in Path(source_snapshot['html_path']).stem,
+        'producer': deck_profile.get('producer'),
+        'producerConfidence': deck_profile.get('producer_confidence'),
+        'exportHints': hints,
+        'contractId': contract.get('contract_id') if contract else None,
+        'exportRole': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
+        'exportSupportTier': layout_info.get('support_tier', ''),
+        'exportIntent': slide_html.get('data-export-intent', ''),
+        'slideStyle': slide_style,
+    }
+
+    return {
+        'slide_index': slide_index,
+        'slide_size': {
+            'width_px': width_px,
+            'height_px': height_px,
+            'width_in': SLIDE_W_IN,
+            'height_in': SLIDE_H_IN,
+        },
+        'background': background_solid,
+        'elements': elements,
+        'pptx_render_hints': _build_pptx_render_hints(elements),
+        'legacy_slide_data': legacy_slide_data,
+    }
+
+
+def solve_geometry(pipeline: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Stage 4: extract render-ready per-slide geometry plans from the export pipeline."""
+    analysis = pipeline['analysis']
+    deck_profile = pipeline['deck_profile']
+    slide_plans = pipeline['slide_plans']
+    source_snapshot = analysis['source_snapshot']
+    soup = source_snapshot['soup']
+    css_rules = source_snapshot['css_rules']
+    contract = source_snapshot['contract']
+
     body_style_str = ''
     body_tag = soup.find('body')
     if body_tag and body_tag.get('style'):
         body_style_str = body_tag['style']
     body_style = compute_element_style(body_tag or Tag(name='body'), css_rules, body_style_str)
-    body_bg = body_style.get('backgroundColor', '')
-    body_bi = body_style.get('backgroundImage', '')
     body_grid_bg = extract_body_decorative_background(css_rules, contract)
     body_mesh_bg = extract_body_mesh_background(body_style, contract)
     body_mesh_solid = _approximate_aurora_mesh_solid_color(body_mesh_bg)
@@ -9157,9 +9330,11 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
         soup,
         css_rules,
         body_style,
-        width_px,
+        source_snapshot['width_px'],
         contract,
     )
+
+    body_bi = body_style.get('backgroundImage', '')
     if body_bi and 'gradient' in body_bi:
         stops = re.findall(r'rgba?\([^)]+\)', body_bi)
         if len(stops) >= 2:
@@ -9177,133 +9352,32 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
 
     print(f"  Found {len(slides_html)} slides. Parsing...")
 
-    slides = []
-    for i, slide_html in enumerate(slides_html):
-        content_root, layout_info, slide_overlay_nodes = _prepare_slide_content_root(slide_html, css_rules, contract)
-        slide_style = _effective_slide_layout_style(
-            slide_html,
-            css_rules,
-            compute_element_style(slide_html, css_rules, slide_html.get('style', '')),
-            contract,
-        )
-
-        bg_info = extract_slide_background(slide_html, css_rules)
-        background_solid = bg_info['solid']
-        background_gradient = bg_info['gradient']
-        grid_bg = bg_info['grid'] or body_grid_bg
-
-        if not background_solid and not background_gradient:
-            if body_mesh_solid:
-                background_solid = body_mesh_solid
-            else:
-                body_rgb = parse_color(body_bg)
-                if body_rgb:
-                    background_solid = body_rgb
-
-        has_own_chrome = bool(
-            slide_html.select('.nav-dots') or
-            slide_html.select('.slide-counter') or
-            slide_html.select('.page-counter')
-        )
-
-        # Detect content area max-width for proper grid/layout constraints
-        content_mw = None
-        cr_style = compute_element_style(content_root, css_rules, content_root.get('style', ''))
-        cr_maxw = cr_style.get('maxWidth', '')
-        if cr_maxw and 'px' in cr_maxw:
-            content_mw = parse_px(cr_maxw)
-
-        # When content_root IS the slide (no .slide-content found), the actual
-        # content width constraint may be on a direct child wrapper rather than
-        # the first child node. Skip absolute-positioned decorative children.
-        if content_mw is None and content_root is slide_html:
-            from bs4 import Tag
-            for child in content_root.children:
-                if not isinstance(child, Tag):
-                    continue
-                child_style = compute_element_style(child, css_rules, child.get('style', ''))
-                if child_style.get('position', '') == 'absolute':
-                    continue
-                child_maxw = child_style.get('maxWidth', '')
-                if child_maxw and 'px' in child_maxw:
-                    content_mw = parse_px(child_maxw)
-                    break
-
-        custom_elements = _build_swiss_role_elements(
-            content_root,
-            css_rules,
-            width_px,
-            height_px,
-            contract,
-            layout_info,
-        )
-        if custom_elements is not None:
-            elements = custom_elements
-        else:
-            elements = flat_extract(
-                content_root,
-                css_rules,
+    geometry_plans: List[Dict[str, Any]] = []
+    for slide_plan in slide_plans:
+        slide_index = int(slide_plan.get('slide_index', 0))
+        if slide_index < 0 or slide_index >= len(slides_html):
+            continue
+        geometry_plans.append(
+            _solve_single_slide_geometry(
+                slide_plan,
+                slides_html[slide_index],
+                source_snapshot,
+                deck_profile,
                 body_style,
-                slide_width_px=width_px,
-                content_width_px=content_mw,
-                contract=contract,
+                body_grid_bg,
+                body_mesh_bg,
+                body_mesh_solid,
+                global_overlays,
             )
-        slide_overlays: List[Dict[str, Any]] = []
-        for overlay_node in slide_overlay_nodes:
-            slide_overlays.extend(
-                flat_extract(
-                    overlay_node,
-                    css_rules,
-                    slide_style,
-                    slide_width_px=width_px,
-                    contract=contract,
-                )
-            )
+        )
+    return geometry_plans
 
-        # Filter out background shapes created for the slide element itself.
-        # Slide backgrounds are already handled by extract_slide_background();
-        # a root-level section shape here is always a duplicate content blocker.
-        if (
-            content_root.name == slide_html.name and
-            _is_slide_root_element(content_root)
-        ):
-            elements = [e for e in elements if not (
-                e.get('type') == 'shape' and
-                e.get('tag') == content_root.name and
-                (
-                    e.get('styles', {}).get('backgroundImage', '') or
-                    e.get('styles', {}).get('backgroundColor', '')
-                )
-            )]
-        if slide_overlays:
-            elements = slide_overlays + elements
-        if global_overlays:
-            elements = [copy.deepcopy(overlay) for overlay in global_overlays] + elements
-        _apply_explicit_positions(elements)
-        title = get_text_content(slide_html)[:50]
 
-        print(f"  [{i+1}/{len(slides_html)}] {title}... ({len(elements)} elements)")
-
-        slides.append({
-            'background': background_solid,
-            'bgGradient': background_gradient,
-            'gridBg': grid_bg,
-            'meshBg': body_mesh_bg,
-            'elements': elements,
-            'hasOwnChrome': has_own_chrome,
-            'contentMaxWidthPx': content_mw,
-            'legacyBlueSkyOffsets': 'blue-sky' in html_path.stem,
-            'producer': deck_profile.get('producer'),
-            'producerConfidence': deck_profile.get('producer_confidence'),
-            'exportHints': hints,
-            'contractId': contract.get('contract_id') if contract else None,
-            'exportRole': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
-            'exportSupportTier': layout_info.get('support_tier', ''),
-            'exportIntent': slide_html.get('data-export-intent', ''),
-            'slideStyle': slide_style,
-        })
-
-    return slides
+def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
+    """Parse an HTML file into a list of slide data dicts."""
+    pipeline = build_export_pipeline(html_path, width_px, height_px)
+    geometry_plans = solve_geometry(pipeline)
+    return [plan['legacy_slide_data'] for plan in geometry_plans]
 
 
 # ─── Layout Pass ──────────────────────────────────────────────────────────────

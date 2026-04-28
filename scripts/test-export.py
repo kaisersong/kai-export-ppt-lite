@@ -62,6 +62,8 @@ try:
 except AttributeError:
     _flatten_nested_containers = None
 parse_html_to_slides = export_sandbox.parse_html_to_slides
+build_export_pipeline = getattr(export_sandbox, 'build_export_pipeline', None)
+solve_geometry = getattr(export_sandbox, 'solve_geometry', None)
 export_sandbox_pptx = export_sandbox.export_sandbox
 validate_export_hints = export_sandbox.validate_export_hints
 detect_producer = export_sandbox.detect_producer
@@ -257,6 +259,32 @@ def test_build_profiles_assigns_contract_bound_deck_profile():
         for candidate in slide_profiles[0]['override_candidates']
     ), slide_profiles[0]['override_candidates']
     print("  PASS: build_profiles assigns contract-bound deck profile")
+
+
+def test_solve_geometry_emits_pptx_geometry_plan_with_render_hints():
+    assert build_export_pipeline is not None, "build_export_pipeline missing"
+    assert solve_geometry is not None, "solve_geometry missing"
+
+    html_path = REPO_ROOT / 'demo' / 'chinese-chan-zh.html'
+    pipeline = build_export_pipeline(html_path, 1440, 900)
+    geometry_plans = solve_geometry(pipeline)
+
+    assert geometry_plans, geometry_plans
+    assert 'pptx_render_hints' in geometry_plans[0], geometry_plans[0]
+    print("  PASS: solve_geometry emits pptx geometry plan with render hints")
+
+
+def test_solve_geometry_preserves_legacy_slide_fields_for_compat_adapter():
+    assert build_export_pipeline is not None, "build_export_pipeline missing"
+    assert solve_geometry is not None, "solve_geometry missing"
+
+    html_path = REPO_ROOT / 'demo' / 'blue-sky-zh.html'
+    pipeline = build_export_pipeline(html_path, 1440, 900)
+    geometry_plans = solve_geometry(pipeline)
+
+    compat_slide = geometry_plans[0]['legacy_slide_data']
+    assert 'elements' in compat_slide and 'slideStyle' in compat_slide, compat_slide
+    print("  PASS: solve_geometry preserves legacy slide fields for compat adapter")
 
 
 def test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck():
@@ -5829,6 +5857,8 @@ def run_tests():
     test_analyze_source_returns_raw_signal_bundles()
     test_build_profiles_assigns_contract_bound_deck_profile()
     test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
+    test_solve_geometry_emits_pptx_geometry_plan_with_render_hints()
+    test_solve_geometry_preserves_legacy_slide_fields_for_compat_adapter()
     test_analyze_source_raw_slide_signals_describe_authored_slide()
     test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence()
     test_plan_slides_does_not_promote_past_analysis_tier()
