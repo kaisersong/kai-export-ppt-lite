@@ -252,7 +252,6 @@ def test_build_profiles_assigns_contract_bound_deck_profile():
         'shrink_if_allowed',
     ], deck_profile
     assert slide_profiles and slide_profiles[0]['slide_index'] == 0, slide_profiles
-    assert slide_profiles[0]['support_tier'] == 'contract_bound', slide_profiles[0]
     assert all(
         candidate.get('type') != 'layout_support_tier'
         for candidate in slide_profiles[0]['override_candidates']
@@ -305,6 +304,44 @@ def test_analyze_source_raw_slide_signals_describe_authored_slide():
     assert 'Badge' in raw_slide['text_preview'], raw_slide
     assert raw_slide['intent'] == 'compare', raw_slide
     print("  PASS: analyze_source raw slide signals stay authored-source based")
+
+
+def test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence():
+    build_profiles = _require_symbol('build_profiles')
+    analysis = {
+        'source_snapshot': {
+            'export_context': {'validation': {'ok': True}},
+            'hints': {'preset': 'Test Preset', 'deck_family': 'test-family'},
+            'contract': {'contract_id': 'slide-creator/test'},
+        },
+        'raw_deck_signals': {
+            'producer': 'slide-creator',
+            'producer_confidence': 'high',
+            'contract_found': True,
+            'producer_signals': 2,
+            'page_boundary_count': 1,
+            'semantic_signals': 2,
+        },
+        'raw_slide_signals': [{
+            'slide_index': 0,
+            'role': '',
+            'intent': '',
+            'layout_support_tier': '',
+            'has_local_contract_evidence': False,
+            'text_count': 1,
+            'semantic_signals': 1,
+            'component_signals': [],
+            'text_signals': ['headings'],
+            'overlay_signals': [],
+        }],
+    }
+
+    deck_profile, slide_profiles = build_profiles(analysis)
+
+    assert deck_profile['support_tier'] == 'contract_bound', deck_profile
+    assert slide_profiles[0]['support_tier'] != 'contract_bound', slide_profiles[0]
+    assert slide_profiles[0]['support_tier'] == 'generic_safe', slide_profiles[0]
+    print("  PASS: slide profiles require local evidence before claiming contract_bound")
 
 
 def test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide():
@@ -5701,6 +5738,7 @@ def run_tests():
     test_build_profiles_assigns_contract_bound_deck_profile()
     test_build_profiles_assigns_semantic_enhanced_for_generic_section_deck()
     test_analyze_source_raw_slide_signals_describe_authored_slide()
+    test_build_profiles_does_not_overstate_slide_contract_bound_without_local_evidence()
     test_parse_html_to_slides_generic_section_roots_keep_fixed_content_isolated_per_slide()
     test_discover_slide_roots_prefers_explicit_dot_slide_over_generic_sections()
     test_parse_px()

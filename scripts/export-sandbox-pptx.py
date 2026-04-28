@@ -8873,14 +8873,18 @@ def _collect_slide_raw_signals(
     if overlay_count:
         overlay_signals.append('slide_anchored')
 
+    has_local_contract_evidence = bool(raw_role := (slide_html.get('data-export-role', '') or layout_info.get('role', '')))
+    if layout_info.get('support_tier') in {'canonical', 'compatible'}:
+        has_local_contract_evidence = True
+
     return {
         'slide_index': slide_index,
         'root_tag': slide_html.name,
         'root_classes': list(slide_html.get('class', [])),
-        'role': slide_html.get('data-export-role', '') or layout_info.get('role', ''),
+        'role': raw_role,
         'intent': slide_html.get('data-export-intent', ''),
         'layout_support_tier': layout_info.get('support_tier', ''),
-        'contract_found': bool(contract),
+        'has_local_contract_evidence': has_local_contract_evidence,
         'text_count': len(text_nodes),
         'heading_count': len(headings),
         'paragraph_count': len(paragraphs),
@@ -8968,7 +8972,7 @@ def _cap_support_tier(local_tier: str, deck_tier: str) -> str:
 
 
 def _assign_slide_support_tier(raw_slide: Dict[str, Any]) -> str:
-    if raw_slide.get('contract_found'):
+    if raw_slide.get('has_local_contract_evidence'):
         return 'contract_bound'
     if raw_slide.get('semantic_signals', 0) >= 2 and raw_slide.get('text_count', 0) > 0:
         return 'semantic_enhanced'
