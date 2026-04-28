@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.5.1`
+Current release: `v1.6.0`
 
 ## 中文说明
 
@@ -134,24 +134,20 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.5.1 更新重点
+### v1.6.0 更新重点
 
-- skill/runtime 执行面收口到“主导出器单文件也能自适应运行”：
-  - 缺失 `__file__` 时自动探测 repo/contracts 根路径
-  - vendored `contracts/` 缺失时自动降级，不阻断基础导出
-  - 依赖未预装时先尝试 runtime bootstrap，再给出最小失败信息
-- 新增可选 bootstrap：
-  - `scripts/run-skill-export.py`
-  - `requirements.txt`
-  - `SKILL.md` 的 hosted sandbox 调用协议更新
-- 修复两条真实回归：
-  - Enterprise Dark split 页右栏 stack 测试定位错误
-  - Chinese Chan 结尾页中等字号标题不应被误导出成 `wrap="none"`
-- 回归测试补强并重新跑完整套：
-  - `single-line contract title stays no-wrap`
-  - `medium contract title keeps wrap square`
-  - `Chinese Chan` roundtrip wrap fidelity
-  - `scripts/test-export.py` 全量通过
+- 导出管线重构成显式多段合同（`analyze → profile → slide plan → geometry plan → render`）：
+  - 新增 `analyze_source` 阶段，先产出 raw signal bundle，再进入任何渲染决策
+  - 新增 profile 阶段，强约束 contract evidence 必须来自本地（preset attribution + tier precedence）
+  - 新增 slide planning 层，per-slide plan state 隔离，规划副作用不再串到几何阶段
+  - 新增 pptx geometry planning 阶段，独占布局决策并配套强化的 stage 合同
+  - render 阶段成为 geometry plan 的纯消费者，不再二次重算布局
+- vendored `slide-creator` presets 同步刷新；`slide root discovery` 提到共享 helper，覆盖 generic section deck
+- `Aurora Mesh` 视觉对比 `9.00/10`：
+  - 弃用接近黑色的背景退化，按授权 mesh 层推导出 atmospheric 单色近似
+  - KPI 默认 compact，仅当源 CSS 显式声明 stretch 时才扩展
+  - 保住 wrapper 居中和 install-card 结构，`overflow = 0`、`overlap = 0`
+- 回归套件全量通过 `python3 scripts/test-export.py`
 
 ### 已知边界
 
@@ -273,20 +269,20 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.5.1 Highlights
+### v1.6.0 Highlights
 
-- Hardened the skill/runtime execution boundary around the single-file exporter:
-  - no hard dependency on `__file__`
-  - graceful fallback when vendored `contracts/` are unavailable
-  - runtime dependency bootstrap before hard failure
-- Added optional hosted-sandbox bootstrap surfaces:
-  - `scripts/run-skill-export.py`
-  - `requirements.txt`
-  - updated `SKILL.md` execution guidance
-- Fixed two real regressions:
-  - Enterprise Dark split-right-rail test selection
-  - Chinese Chan closing-title wrap mode regressing to `wrap="none"`
-- Expanded regression coverage and reran the full suite successfully with `python3 scripts/test-export.py`
+- Restructured the export pipeline into explicit, contract-bound stages (`analyze → profile → slide plan → geometry plan → render`):
+  - new `analyze_source` stage emits raw signal bundles before any rendering decision is made
+  - new profile stage tightens style-profile semantics (preset attribution + tier precedence) and requires local contract evidence
+  - new `slide planning` layer isolates per-slide plan state so planning side effects do not leak into geometry decisions
+  - new `pptx geometry planning` stage owns layout decisions and ships a strengthened stage contract
+  - `render` is now a pure consumer of geometry plans and no longer recomputes layout
+- Refreshed vendored `slide-creator` presets; lifted `slide root discovery` into a reusable helper that handles generic section decks
+- `Aurora Mesh` visual compare snapshot at `9.00/10`:
+  - replaced the previous near-black fallback with an atmospheric solid-color approximation derived from the authored aurora mesh layers
+  - kept Aurora KPI tracks compact by default, but still honor explicit authored stretch signals
+  - preserved Aurora wrapper-centered layout and install-card structure with `overflow = 0` and `overlap = 0`
+- Full regression suite passes with `python3 scripts/test-export.py`
 
 ### Known Gaps
 

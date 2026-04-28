@@ -1,12 +1,23 @@
 # Release Notes
 
-## Unreleased - 2026-04-28
+## v1.6.0 - 2026-04-28
 
-This branch finishes the current `Aurora Mesh` optimization pass and pushes the real visual compare snapshot to `9.00/10`. The main shipped work is not broader preset churn; it is a focused Aurora export-quality correction around background fallback, KPI sizing, and preset-specific layout fidelity.
+This release has two main bodies of work. First, the export pipeline is restructured into explicit, contract-bound stages (`analyze → profile → slide plan → geometry plan → render`), so each stage is independently testable and the runtime stops mixing extraction, planning, and rendering on a single pass. Second, `Aurora Mesh` finishes its current optimization pass and reaches a real `9.00/10` visual compare snapshot.
 
-本次未发布变更完成了当前这轮 `Aurora Mesh` 优化，并把真实视觉对比分数推进到 `9.00/10`。核心交付不是继续扩散到更多 preset，而是集中修正 Aurora 的背景退化、KPI 宽度策略，以及 preset-specific 布局 fidelity。
+本次发布有两条主线工作。第一，导出管线被重构成显式的多段合同（`analyze → profile → slide plan → geometry plan → render`），每一段都能独立测试，运行时不再把抽取、规划和渲染混在一遍流程里。第二，`Aurora Mesh` 完成本轮优化，真实视觉对比快照达到 `9.00/10`。
 
 ### Highlights
+
+Staged export pipeline:
+
+- New `analyze_source` stage emits raw signal bundles before any rendering decision is made
+- New profile stage tightens style-profile semantics (preset attribution + tier precedence) so contract evidence has to be local
+- New `slide planning` layer isolates per-slide plan state and keeps planning side effects out of geometry decisions
+- New `pptx geometry planning` stage owns layout decisions and ships a strengthened stage contract
+- `render` is now a pure consumer of geometry plans; it no longer recomputes layout
+- Vendored `slide-creator` presets refreshed and shared `slide root discovery` lifted to a reusable helper for generic section decks
+
+`Aurora Mesh` fidelity:
 
 - `Aurora Mesh` visual compare snapshot: `9.00/10`
 - Replaced the previous near-black fallback with an atmospheric solid-color approximation derived from the authored aurora mesh layers
