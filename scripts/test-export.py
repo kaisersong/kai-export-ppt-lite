@@ -167,6 +167,65 @@ def _require_symbol(symbol_name: str):
     return symbol
 
 
+def test_discover_slide_roots_accepts_generic_section_deck():
+    discover_slide_roots = _require_symbol('discover_slide_roots')
+    html = """
+    <html><body>
+      <section data-slide="1"><h1>One</h1><p>Intro</p></section>
+      <section data-slide="2"><h1>Two</h1><p>Outro</p></section>
+    </body></html>
+    """
+    soup = BeautifulSoup(html, 'lxml')
+    roots = discover_slide_roots(soup)
+    assert [root.get('data-slide') for root in roots] == ['1', '2']
+    print("  PASS: discover_slide_roots accepts generic section decks")
+
+
+def test_discover_slide_roots_rejects_article_like_document():
+    discover_slide_roots = _require_symbol('discover_slide_roots')
+    html = """
+    <html><body>
+      <article><h1>Long Article</h1><p>Body copy</p></article>
+    </body></html>
+    """
+    soup = BeautifulSoup(html, 'lxml')
+    assert discover_slide_roots(soup) == []
+    print("  PASS: discover_slide_roots rejects article-like documents")
+
+
+def test_assign_support_tier_uses_deterministic_precedence():
+    assign_support_tier = _require_symbol('_assign_support_tier')
+    assert assign_support_tier({
+        'contract_found': True,
+        'producer_confidence': 'high',
+        'producer_signals': 2,
+        'page_boundary_count': 5,
+        'semantic_signals': 4,
+    }) == 'contract_bound'
+    assert assign_support_tier({
+        'contract_found': False,
+        'producer_confidence': 'medium',
+        'producer_signals': 2,
+        'page_boundary_count': 5,
+        'semantic_signals': 4,
+    }) == 'producer_aware'
+    assert assign_support_tier({
+        'contract_found': False,
+        'producer_confidence': 'low',
+        'producer_signals': 1,
+        'page_boundary_count': 3,
+        'semantic_signals': 2,
+    }) == 'semantic_enhanced'
+    assert assign_support_tier({
+        'contract_found': False,
+        'producer_confidence': 'none',
+        'producer_signals': 0,
+        'page_boundary_count': 0,
+        'semantic_signals': 0,
+    }) == 'generic_safe'
+    print("  PASS: support tier precedence is deterministic")
+
+
 def test_parse_px():
     """Test CSS pixel parsing utility."""
     assert parse_px('16px') == 16.0
@@ -5503,6 +5562,9 @@ def run_tests():
     print()
 
     print("Utilities:")
+    test_discover_slide_roots_accepts_generic_section_deck()
+    test_discover_slide_roots_rejects_article_like_document()
+    test_assign_support_tier_uses_deterministic_precedence()
     test_parse_px()
     test_parse_px_supports_minmax_math()
     test_validate_export_hints_rejects_unknown_layout_fields()

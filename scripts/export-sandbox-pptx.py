@@ -8754,6 +8754,42 @@ def extract_slide_background(slide_el: Tag, css_rules: List[CSSRule]) -> Dict:
 
 # ─── HTML → Slides Parsing ───────────────────────────────────────────────────
 
+def discover_slide_roots(soup: BeautifulSoup) -> List[Tag]:
+    explicit_roots = soup.select('.slide')
+    if explicit_roots:
+        return explicit_roots
+
+    body = soup.find('body')
+    if not body:
+        return []
+
+    roots: List[Tag] = []
+    for child in body.find_all(recursive=False):
+        if not isinstance(child, Tag):
+            continue
+        if child.name.lower() != 'section':
+            continue
+        if child.get('data-slide') or child.get('data-page') or child.get('data-export-role'):
+            roots.append(child)
+    return roots
+
+
+def _assign_support_tier(signals: Dict[str, Any]) -> str:
+    if signals.get('contract_found'):
+        return 'contract_bound'
+    if (
+        signals.get('producer_confidence') in {'high', 'medium'}
+        and signals.get('producer_signals', 0) >= 2
+    ):
+        return 'producer_aware'
+    if (
+        signals.get('page_boundary_count', 0) > 0
+        and signals.get('semantic_signals', 0) >= 2
+    ):
+        return 'semantic_enhanced'
+    return 'generic_safe'
+
+
 def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: float = 810) -> List[Dict]:
     """Parse an HTML file into a list of slide data dicts."""
     with open(html_path, 'r', encoding='utf-8') as f:
@@ -8797,9 +8833,9 @@ def parse_html_to_slides(html_path: Path, width_px: float = 1440, height_px: flo
                     'backgroundImage': body_bi
                 }))
 
-    slides_html = soup.select('.slide')
+    slides_html = discover_slide_roots(soup)
     if not slides_html:
-        print("No .slide elements found in HTML.")
+        print("No slide roots found in HTML.")
         return []
 
     print(f"  Found {len(slides_html)} slides. Parsing...")
