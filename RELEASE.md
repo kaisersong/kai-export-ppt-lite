@@ -1,5 +1,18 @@
 # Release Notes
 
+## v1.6.3 - 2026-04-29
+
+This patch closes the canonical Swiss vertical-centering regression: right-side panels in `column_content` and inner-panel slides were stacking content against the top instead of honoring the authored `justify-content: center`.
+
+本次补丁修复 canonical Swiss 垂直居中问题：`column_content` 右栏和 inner-panel 系列幻灯片之前把内容贴顶部，没尊重源 CSS 的 `justify-content: center`。
+
+### Highlights
+
+- `_build_swiss_column_content` right column now mirrors left-column vertical centering instead of forcing `right_y = 0` for canonical tier
+- `_build_swiss_title_grid` resolves `justify-content` from the inner panel first (e.g. `.flow-inner { justify-content: center }`) before falling back to slide root
+- `Swiss Modern` canonical visual snapshot: Slide 05 `8.6 → 9.0`, Slide 06 `8.9 → 9.0`, overall `9.00 → 9.06`
+- `Aurora Mesh` regression unchanged at `9.00/10`
+
 ## v1.6.2 - 2026-04-29
 
 This patch lifts `Swiss Modern` canonical visual fidelity from `8.93/10` to `9.00/10` and pulls Slide 03/04/05/06/07 each up by `+0.1`. Two real wins underneath: a `display heading` optical-boost trigger that was overshooting whenever `noto sans` appeared in the font stack, and a missing `inner_panel` layout role for slides that have a single content panel without a `.bg-num` decoration (e.g. Swiss Slide 5 `flow-inner` and Slide 6 `feat-inner`). The compare harness was also tightened so the SSIM score reflects layout fidelity rather than cross-renderer font-rasterization differences.

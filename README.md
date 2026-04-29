@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.2`
+Current release: `v1.6.3`
 
 ## 中文说明
 
@@ -133,6 +133,13 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.3 更新重点（patch）
+
+- `_build_swiss_column_content` 的右栏改成跟左栏一致的垂直居中（之前 canonical tier 硬编码 `right_y = 0`）
+- `_build_swiss_title_grid` 的 `justify-content` 优先从 inner panel 取（如 `.flow-inner { justify-content: center }`）
+- `Swiss Modern` canonical：Slide 05 `8.6 → 9.0`、Slide 06 `8.9 → 9.0`、整体 `9.00 → 9.06`
+- `Aurora Mesh` 视觉回归保持 `9.00/10`
 
 ### v1.6.2 更新重点（patch）
 
@@ -289,6 +296,13 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.3 Highlights (patch)
+
+- `_build_swiss_column_content` right column now mirrors the left column's vertical centering (previously hard-coded `right_y = 0` on canonical tier)
+- `_build_swiss_title_grid` resolves `justify-content` from the inner panel first (e.g. `.flow-inner { justify-content: center }`) before falling back to slide root
+- `Swiss Modern` canonical snapshot: Slide 05 `8.6 → 9.0`, Slide 06 `8.9 → 9.0`, overall `9.00 → 9.06`
+- `Aurora Mesh` visual compare unchanged at `9.00/10`
 
 ### v1.6.2 Highlights (patch)
 

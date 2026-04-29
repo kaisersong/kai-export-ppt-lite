@@ -3543,7 +3543,11 @@ def _build_swiss_column_content(
     left_content['bounds']['y'] = left_content_y
     root['children'].append(left_content)
 
-    right_y = 0.0 if tier == 'canonical' else max((root_h_in - right_container['bounds'].get('height', 0.0)) / 2.0, 0.0)
+    # Swiss canonical right-panel CSS uses justify-content: center (vertical
+    # centering inside the column). Earlier this branch hard-coded right_y=0
+    # for canonical tier, which pushed every right-panel content to the top.
+    # Mirror the left-panel behavior and center the right column too.
+    right_y = max((root_h_in - right_container['bounds'].get('height', 0.0)) / 2.0, 0.0)
     right_container['bounds']['x'] = left_w_in
     right_container['bounds']['y'] = right_y
     root['children'].append(right_container)
@@ -3772,7 +3776,6 @@ def _build_swiss_title_grid(
     slide_h_in = slide_height_px / PX_PER_IN
     slide_pad_l, slide_pad_r, slide_pad_t, slide_pad_b = _resolve_box_padding_in(slide_style, slide_width_px, slide_height_px)
     content_h_in = max(slide_h_in - slide_pad_t - slide_pad_b, 0.8)
-    justify = (slide_style.get('justifyContent') or slide_style.get('justify-content') or '').strip()
 
     # Accept the Swiss canonical *-inner panels that share the "single
     # vertically-stacked inner content panel" geometry. Slides whose inner
@@ -3789,6 +3792,17 @@ def _build_swiss_title_grid(
     content_x_in = slide_pad_l
     bottom_in = slide_pad_b
     top_in = slide_pad_t
+
+    # Resolve justify-content from the inner panel first when present (e.g.
+    # `.flow-inner { justify-content: center }`); fall back to slide root
+    # for cases like `#slide-1 { justify-content: flex-end }` where the
+    # whole slide drives vertical alignment.
+    justify = ''
+    if hero_node is not None:
+        _hero_style_probe = compute_element_style(hero_node, css_rules, hero_node.get('style', ''), slide_style)
+        justify = (_hero_style_probe.get('justifyContent') or _hero_style_probe.get('justify-content') or '').strip()
+    if not justify:
+        justify = (slide_style.get('justifyContent') or slide_style.get('justify-content') or '').strip()
 
     if hero_node is not None:
         hero_style = compute_element_style(hero_node, css_rules, hero_node.get('style', ''), slide_style)
