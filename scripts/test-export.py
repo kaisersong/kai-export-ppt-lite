@@ -4389,11 +4389,13 @@ def test_map_font_mixed_serif_stack_uses_latin_and_cjk_pair_for_mixed_script():
 
 
 def test_map_font_swiss_display_stack_prefers_archivo_fallback_for_latin():
-    """Swiss display stacks should keep a heavy Latin display face for Latin-only headlines."""
+    """Swiss display stacks remap to the cross-renderer-stable Helvetica Neue
+    pair; the comparison renderer also overrides web fonts to the same
+    Helvetica fallback, so both sides share rasterization geometry."""
     latin_font, ea_font = map_font('"Archivo Black", "Nunito", "Noto Sans SC", sans-serif', text='SWISS')
-    assert latin_font == 'Arial Black', (latin_font, ea_font)
-    assert ea_font == 'Arial Black', (latin_font, ea_font)
-    print("  PASS: Swiss display stack keeps heavy Latin fallback")
+    assert latin_font == 'Helvetica Neue', (latin_font, ea_font)
+    assert ea_font == 'Helvetica Neue', (latin_font, ea_font)
+    print("  PASS: Swiss display stack maps to Helvetica Neue cross-renderer pair")
 
 
 def test_resolve_text_contract_chinese_chan_preserves_body_breaks():

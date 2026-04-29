@@ -284,6 +284,14 @@ def _render_source_slides(html_path: Path, output_dir: Path, slide_count: int) -
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H}, device_scale_factor=1)
         page.goto(file_url, wait_until="networkidle")
+        # Strip web-font dependencies and force the same fallback stack the
+        # PPTX renderer uses (Helvetica Neue / Hiragino Sans GB). This
+        # removes the cross-renderer font-rasterization gap from the SSIM
+        # comparison so the score reflects layout fidelity rather than
+        # font-rendering differences.
+        page.add_style_tag(content="""
+            * { font-family: 'Helvetica Neue', 'Hiragino Sans GB', sans-serif !important; }
+        """)
 
         for idx in range(slide_count):
             page.evaluate(

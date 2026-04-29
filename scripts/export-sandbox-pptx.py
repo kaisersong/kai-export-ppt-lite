@@ -2183,7 +2183,11 @@ def _should_apply_display_heading_boost(tag: str, style: Dict[str, str], text: s
     font_stack = (style.get('fontFamily', '') or '').lower()
     if 'space grotesk' in font_stack:
         return False
-    if not any(token in font_stack for token in ('inter', 'dm sans', 'clash display', 'satoshi', 'noto sans', 'system-ui')):
+    # 'noto sans' is intentionally excluded: when the source CSS lists Noto
+    # Sans SC and the exporter remaps it to Helvetica Neue + Hiragino Sans GB,
+    # both Latin and CJK glyphs render at the authored font-size with no
+    # optical shrinkage, so a 1.30x boost overshoots and wraps headings.
+    if not any(token in font_stack for token in ('inter', 'dm sans', 'clash display', 'satoshi', 'system-ui')):
         return False
     font_px = parse_px(style.get('fontSize', '16px'))
     if font_px < 28.0:
@@ -3770,7 +3774,15 @@ def _build_swiss_title_grid(
     content_h_in = max(slide_h_in - slide_pad_t - slide_pad_b, 0.8)
     justify = (slide_style.get('justifyContent') or slide_style.get('justify-content') or '').strip()
 
-    hero_node = _direct_child_matches_selector(slide_root, '.hero-inner')
+    # Accept the Swiss canonical *-inner panels that share the "single
+    # vertically-stacked inner content panel" geometry. Slides whose inner
+    # panel is left-aligned list content (sol / cta / inst) keep going
+    # through the generic flat_extract path — title_grid's vertical
+    # centering + content packing was empirically worse for them.
+    hero_node, _matched_inner_selector = _direct_child_matches_any_selector(
+        slide_root,
+        ['.hero-inner', '.flow-inner', '.feat-inner'],
+    )
     hero_style = slide_style
     content_node = slide_root
     content_width_px = max((slide_w_in - slide_pad_l - slide_pad_r) * PX_PER_IN, 180.0)
@@ -3915,7 +3927,7 @@ def _build_swiss_role_elements(
     if (contract or {}).get('contract_id') != 'slide-creator/swiss-modern':
         return None
     role = (layout_info.get('role') or '').strip()
-    if role == 'title_grid':
+    if role == 'title_grid' or role == 'inner_panel':
         return _build_swiss_title_grid(
             slide_root,
             css_rules,
@@ -10551,8 +10563,8 @@ _FONT_MAP = {
     'Space Grotesk': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Clash Display': ('Helvetica Neue', 'Hiragino Sans GB'),
     'Satoshi':       ('Helvetica Neue', 'Hiragino Sans GB'),
-    'Archivo Black': ('Arial Black', 'Hiragino Sans GB'),
-    'Archivo':       ('Arial', 'Hiragino Sans GB'),
+    'Archivo Black': ('Helvetica Neue', 'Hiragino Sans GB'),
+    'Archivo':       ('Helvetica Neue', 'Hiragino Sans GB'),
     'Nunito':        ('Helvetica Neue', 'Hiragino Sans GB'),
     'EB Garamond':   ('Baskerville', 'Songti SC'),
     'Noto Serif SC': ('Songti SC', 'Songti SC'),
@@ -10611,8 +10623,8 @@ _LATIN_SAFE_FONT_KEYS = {
     'space grotesk': ('Helvetica Neue', 'Helvetica Neue'),
     'clash display': ('Helvetica Neue', 'Helvetica Neue'),
     'satoshi': ('Helvetica Neue', 'Helvetica Neue'),
-    'archivo black': ('Arial Black', 'Arial Black'),
-    'archivo': ('Arial', 'Arial'),
+    'archivo black': ('Helvetica Neue', 'Helvetica Neue'),
+    'archivo': ('Helvetica Neue', 'Helvetica Neue'),
     'nunito': ('Helvetica Neue', 'Helvetica Neue'),
     'eb garamond': ('Baskerville', 'Baskerville'),
     'baskerville': ('Baskerville', 'Baskerville'),

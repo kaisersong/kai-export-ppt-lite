@@ -367,6 +367,17 @@
         ],
         "unwrap_wrapper": true
       }
+    },
+    "inner_panel": {
+      "canonical": {
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "direct_children_any": [
+          ".flow-inner",
+          ".feat-inner"
+        ]
+      }
     }
   },
   "style_constraints": {

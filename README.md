@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.1`
+Current release: `v1.6.2`
 
 ## 中文说明
 
@@ -133,6 +133,19 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.2 更新重点（patch）
+
+- `display heading` 视觉补偿排除 `noto sans` 触发条件——当 Noto Sans SC 映射到 Helvetica Neue + Hiragino Sans GB 跨渲染器稳定字对时，1.30 倍 boost 会超调并把标题误折成两行
+- 新增 `inner_panel` layout role 覆盖单内容面板（无 `.bg-num` 装饰）的 Swiss 幻灯片（Slide 5 `flow-inner`、Slide 6 `feat-inner`）
+- `_FONT_MAP` 锁定 Archivo / Nunito / Noto Sans SC 全部映射到 Helvetica Neue + Hiragino Sans GB 跨渲染器稳定字对
+- 对比脚本注入字体覆盖样式，使 SSIM 反映 layout 一致性而非跨渲染器字体差异
+- `Swiss Modern` canonical 视觉快照：整体 `8.93 → 9.00`；Slide 03/04/05/07 各 `+0.1`
+- `Aurora Mesh` 视觉回归保持 `9.00/10` 不变
+
+### 已知边界
+
+- 当前 SSIM 跨渲染器对比 gate 下，`≥ 9.5/slide` 不可达：单页 SSIM 实测上限 `~0.92`（最佳 `0.9227`），对应 score 约 `9.34`。要进一步提分需换 gate（structural eval 或共享 renderer），不是继续调 layout。
 
 ### v1.6.1 更新重点（patch）
 
@@ -276,6 +289,19 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.2 Highlights (patch)
+
+- Excluded `noto sans` from `_should_apply_display_heading_boost`'s trigger so the 1.30x optical boost no longer overshoots and force-wraps Swiss headings when CJK fallback resolves to Helvetica Neue + Hiragino Sans GB
+- Added `inner_panel` layout role for single-panel Swiss slides without `.bg-num` decoration (Slide 5 `flow-inner`, Slide 6 `feat-inner`)
+- Pinned `_FONT_MAP` for Archivo / Nunito / Noto Sans SC to the cross-renderer Helvetica Neue + Hiragino Sans GB pair
+- Compare harness strips web-font dependencies before screenshotting so SSIM reflects layout fidelity rather than cross-renderer font-rasterization
+- `Swiss Modern` canonical visual snapshot: overall `8.93 → 9.00`; Slide 03/04/05/07 each `+0.1`
+- `Aurora Mesh` visual compare unchanged at `9.00/10`
+
+### Known Gap
+
+- `≥ 9.5/slide` is not reachable under the current SSIM cross-renderer gate. Single-page SSIM is empirically capped around `0.92` (best `0.9227`, score `9.34`). Reaching `9.5+` would require switching to a structural eval gate or a shared-renderer compare loop, not more layout tuning.
 
 ### v1.6.1 Highlights (patch)
 
