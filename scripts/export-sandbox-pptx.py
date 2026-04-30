@@ -1600,6 +1600,23 @@ def _detect_flex_row(style: Dict[str, str]) -> bool:
     return direction != 'column'
 
 
+def _flex_row_prefers_compact_packing(style: Dict[str, str]) -> bool:
+    """Source CSS authored a compact-packed flex row.
+
+    Pattern (e.g. `.hero-stats { display:flex; gap: 32px }`): explicit `gap`
+    with no distributing `justify-content`. Children pack at their intrinsic
+    widths separated by `gap`, NOT spread evenly across the container.
+    """
+    if not _detect_flex_row(style):
+        return False
+    if _get_gap_px(style) <= 0:
+        return False
+    justify = style.get('justifyContent', style.get('justify-content', '')).strip()
+    if justify in ('space-between', 'space-around', 'space-evenly'):
+        return False
+    return True
+
+
 def _resolve_css_length_with_basis(val_str: str, basis_px: float) -> float:
     val_str = (val_str or '').strip()
     if not val_str:
@@ -3458,6 +3475,39 @@ def _pack_direct_child_content(
     return _coerce_relative_container(node, node_style, packed_children)
 
 
+_COLUMN_BLOCK_TEXT_TAGS = frozenset({'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'})
+
+
+def _stretch_column_block_text_to_inner_width(
+    container: Dict[str, Any],
+    inner_width_in: float,
+) -> None:
+    """Force block-level headings/paragraphs in a column panel to claim the
+    full inner panel width.
+
+    Without this, `flat_extract` shrink-wraps a heading to its natural text
+    width (e.g. 2.08"), and any authored `<br>` line that is itself slightly
+    wider than the shrunk frame wraps again, producing orphaned half-rows
+    instead of the two clean lines the source intended.
+    """
+    if not container or inner_width_in <= 0:
+        return
+    children = container.get('children') or []
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        if child.get('type') != 'text':
+            continue
+        if child.get('tag') not in _COLUMN_BLOCK_TEXT_TAGS:
+            continue
+        bounds = child.get('bounds')
+        if not bounds:
+            continue
+        if bounds.get('width', 0.0) >= inner_width_in - 0.01:
+            continue
+        bounds['width'] = inner_width_in
+
+
 def _build_swiss_column_content(
     slide_root: Tag,
     css_rules: List[CSSRule],
@@ -3499,6 +3549,15 @@ def _build_swiss_column_content(
         left_inner_w_px,
         contract,
     )
+    if left_content is not None:
+        # Block-level headings/paragraphs in a column panel must claim the full
+        # inner panel width so authored line breaks survive — otherwise the
+        # text element shrink-wraps to its natural width and the wrap engine
+        # turns each authored line into orphaned half-rows.
+        _stretch_column_block_text_to_inner_width(
+            left_content,
+            max(left_w_in - left_pad_l - left_pad_r - left_border_l, 0.6),
+        )
     right_container = _build_packed_child_container(
         right_node,
         css_rules,
@@ -6213,6 +6272,55 @@ def _measure_preferred_child_width_in(
     return text_el.get('bounds', {}).get('width', 0.0)
 
 
+def _measure_compact_flex_child_width_in(
+    child: Tag,
+    child_style: Dict[str, str],
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    cap_in: float,
+) -> float:
+    """Intrinsic width for a compact flex-row child (stacked block descendants OK).
+
+    For text/leaf children: defer to `_measure_preferred_child_width_in()`.
+    For container children that wrap stacked block descendants (e.g. a stat
+    block with a numeric div above a label div), return the widest descendant
+    text line instead of dividing the row width evenly.
+    """
+    if cap_in <= 0:
+        return 0.0
+    text_w = _measure_preferred_child_width_in(child, child_style, css_rules, slide_width_px)
+    if text_w > 0:
+        return min(text_w, cap_in)
+    natural = compute_text_content_width(child, css_rules, child_style)
+    widest = 0.0
+    for desc in child.descendants:
+        if not isinstance(desc, Tag):
+            continue
+        desc_tag = desc.name.lower()
+        if desc_tag not in TEXT_TAGS and not is_leaf_text_container(desc, css_rules):
+            continue
+        text = get_text_content(desc).strip()
+        if not text:
+            continue
+        desc_style = compute_element_style(desc, css_rules, desc.get('style', ''), child_style)
+        font_px = parse_px(desc_style.get('fontSize', '16px')) or 16.0
+        cjk = sum(1 for c in text if ord(c) > 127)
+        latin = len(text) - cjk
+        approx = (cjk * font_px * 0.96 + latin * font_px * 0.55) / PX_PER_IN
+        if approx > widest:
+            widest = approx
+    if widest <= 0 and natural > 0:
+        widest = natural
+    if widest <= 0:
+        return 0.0
+    _expand_padding(child_style)
+    widest += (
+        parse_px(child_style.get('paddingLeft', '0px')) +
+        parse_px(child_style.get('paddingRight', '0px'))
+    ) / PX_PER_IN
+    return min(widest, cap_in)
+
+
 def _estimate_group_baseline_in(group: List[Dict[str, Any]], bg_shape: Optional[Dict[str, Any]] = None) -> float:
     """Approximate the first-baseline position for flex-row baseline alignment."""
     first_text = None
@@ -7546,6 +7654,43 @@ def build_grid_children(
                 flex_child_widths.append(0.0)
 
         remaining_w = max(flex_inner_width_in - fixed_total - gap_in * max(len(flex_children) - 1, 0), 0.5)
+        # Compact flex-row (explicit gap, no distributing justify-content):
+        # measure each unfilled slot's intrinsic content width instead of
+        # spreading children evenly across the row. Falls back to even split
+        # if a slot has flex-grow/explicit width or its intrinsic doesn't fit.
+        compact_packing = _flex_row_prefers_compact_packing(style)
+        if compact_packing and flex_slots:
+            measured: Dict[int, float] = {}
+            cap_per_slot = max(remaining_w / max(len(flex_slots), 1), 0.5)
+            all_compact = True
+            for slot_idx in flex_slots:
+                slot_child = flex_children[slot_idx]
+                slot_style = compute_element_style(
+                    slot_child, css_rules, slot_child.get('style', ''), style
+                )
+                if (
+                    _style_flex_grow_value(slot_style) > 0.0
+                    or _style_has_explicit_width_signal(slot_style)
+                ):
+                    all_compact = False
+                    break
+                intrinsic = _measure_compact_flex_child_width_in(
+                    slot_child, slot_style, css_rules, slide_width_px, cap_per_slot
+                )
+                if intrinsic <= 0:
+                    all_compact = False
+                    break
+                measured[slot_idx] = intrinsic
+            if all_compact and measured:
+                projected_total = (
+                    fixed_total
+                    + sum(measured.values())
+                    + gap_in * max(len(flex_children) - 1, 0)
+                )
+                if projected_total <= flex_inner_width_in + 0.001:
+                    for slot_idx, w in measured.items():
+                        flex_child_widths[slot_idx] = w
+                    flex_slots = []
         if flex_slots:
             slot_w = remaining_w / len(flex_slots)
             for idx in flex_slots:

@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.3`
+Current release: `v1.6.4`
 
 ## 中文说明
 
@@ -133,6 +133,14 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.4 更新重点（patch）
+
+- `build_grid_children` 新增 compact flex-row 识别（gap + 无 `space-between/around/evenly` justify-content）：子元素按 intrinsic 内容宽度紧凑排布，不再强制平分整行宽度。修复 Slide 1 / 8 的 `.hero-stats` KPI 横跨整行问题（P1 横跨 `8.7" → 1.8"`）
+- `_build_swiss_column_content` 后置 stretch：左栏块级标题/段落强制取容器内宽，避免 `<br>` 显式换行被二次折成孤字（P2 标题 `2.08" → 4.03"`，由 spAutoFit 接管高度生成 2 行干净换行）
+- 新增三个回归测试：`test_compact_flex_row_packs_stat_blocks_at_intrinsic_width`、`test_compact_flex_row_falls_back_to_even_split_when_oversized`、`test_stretch_column_block_text_to_inner_width_expands_narrow_heading`
+- `Swiss Modern` canonical 整体保持 `9.06/10`（cross-renderer SSIM 已逼近 cap），结构对应 source CSS 的真实意图
+- `Aurora Mesh` 视觉回归保持 `9.00/10`
 
 ### v1.6.3 更新重点（patch）
 
@@ -296,6 +304,14 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.4 Highlights (patch)
+
+- `build_grid_children` now detects compact flex-row intent (`gap` + non-distributing `justify-content`) and packs children at their intrinsic content width instead of forcing an even split across the row. Fixes the `.hero-stats` KPI block on Swiss Slides 1 / 8 (P1 horizontal span `8.7" → 1.8"`)
+- `_build_swiss_column_content` post-pack stretches block-level headings / paragraphs in column panels to the full inner panel width, so authored `<br>` line breaks survive instead of getting wrapped into orphan half-rows (P2 title `2.08" → 4.03"`, height taken over by `spAutoFit` to produce two clean lines)
+- Three new regression tests: `test_compact_flex_row_packs_stat_blocks_at_intrinsic_width`, `test_compact_flex_row_falls_back_to_even_split_when_oversized`, `test_stretch_column_block_text_to_inner_width_expands_narrow_heading`
+- `Swiss Modern` canonical snapshot stays at `9.06/10` overall (cross-renderer SSIM is near the empirical cap), but the structure now matches the authored CSS intent
+- `Aurora Mesh` visual compare unchanged at `9.00/10`
 
 ### v1.6.3 Highlights (patch)
 

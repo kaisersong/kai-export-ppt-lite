@@ -1,5 +1,42 @@
 # Release Notes
 
+## v1.6.4 - 2026-04-30
+
+This patch closes two structural mismatches between source CSS and the exporter on `Swiss Modern`: `.hero-stats` KPI rows on Slide 1 / 8 were being spread evenly across the full slide width instead of packed at the authored `gap` distance, and the Slide 2 left-panel heading was shrink-wrapping to its natural text width and then re-wrapping each authored `<br>` line into orphan half-rows.
+
+本次补丁修复了 `Swiss Modern` 上两类源 CSS 与导出器的结构性偏差：Slide 1 / 8 的 `.hero-stats` 行被错误地均匀分布到整个幻灯片宽度，而不是按源 CSS 的 `gap` 距离紧凑排布；Slide 2 左栏标题被 shrink-wrap 到自然文本宽度，导致每行 `<br>` 又被二次折成孤字。
+
+### Highlights
+
+- `build_grid_children` adds a compact-flex-row path: a flex row with explicit `gap` and a non-distributing `justify-content` packs each child at its intrinsic content width (`_measure_compact_flex_child_width_in()`) instead of dividing the remaining row width evenly. Falls back to the legacy even-split when intrinsic widths overflow the container.
+- `_build_swiss_column_content` post-pack stretches block-level headings / paragraphs in column panels to the full inner panel width via `_stretch_column_block_text_to_inner_width()` so authored `<br>` line breaks render as the source intended.
+- Aurora KPI cards keep going through the dedicated `_contract_vertical_card_prefers_stretch_width` path, so the `slide-creator/aurora-mesh` contract is not affected.
+- Three new regression tests cover compact packing, the oversize fallback, and the column-text stretch behavior.
+
+### Geometry deltas (Swiss Modern)
+
+| Slide | Element | Before | After |
+| --- | --- | --- | --- |
+| 1 | `.hero-stats` `21 / 0 / 3` horizontal span | `8.7"` | `1.8"` |
+| 8 | `/slide-creator` KPI row span | full row | `1.4"` |
+| 2 | `.left-panel h2` width | `2.08"` (4 wrapped lines) | `4.03"` (2 clean lines via `spAutoFit`) |
+
+### Visual snapshot
+
+- `Swiss Modern` canonical overall stays at `9.06/10` — cross-renderer SSIM is already near its empirical cap (~`0.92` per page), so the structural fix is invisible to the score even though the layout now matches the source CSS intent
+- `Aurora Mesh` regression unchanged at `9.00/10`
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
 ## v1.6.3 - 2026-04-29
 
 This patch closes the canonical Swiss vertical-centering regression: right-side panels in `column_content` and inner-panel slides were stacking content against the top instead of honoring the authored `justify-content: center`.

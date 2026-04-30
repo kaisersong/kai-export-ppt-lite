@@ -55,6 +55,7 @@ flat_extract = export_sandbox.flat_extract
 extract_css_from_soup = export_sandbox.extract_css_from_soup
 map_font = export_sandbox.map_font
 measure_flow_box = export_sandbox.measure_flow_box
+_stretch_column_block_text_to_inner_width = export_sandbox._stretch_column_block_text_to_inner_width
 flow_gap_in = getattr(export_sandbox, '_flow_gap_in', None)
 remeasure_text_for_final_width = getattr(export_sandbox, '_remeasure_text_for_final_width', None)
 try:
@@ -2805,6 +2806,128 @@ def test_centered_flex_wrap_preserves_intrinsic_metric_stack_widths():
     print("  PASS: centered flex-wrap preserves intrinsic metric stack widths")
 
 
+def test_compact_flex_row_packs_stat_blocks_at_intrinsic_width():
+    """`.hero-stats { display:flex; gap }` (no justify-content) must pack each
+    stat block at intrinsic width, not divide the row evenly."""
+    html = '''
+    <div style="display:flex; gap:48px;">
+      <div>
+        <div style="font-size:48px; font-weight:900; line-height:1;">21</div>
+        <div style="font-size:11px; letter-spacing:0.08em;">设计预设</div>
+      </div>
+      <div>
+        <div style="font-size:48px; font-weight:900; line-height:1;">0</div>
+        <div style="font-size:11px; letter-spacing:0.08em;">运行时依赖</div>
+      </div>
+      <div>
+        <div style="font-size:48px; font-weight:900; line-height:1;">3</div>
+        <div style="font-size:11px; letter-spacing:0.08em;">分钟出稿</div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    row = soup.find('div')
+    style = compute_element_style(row, [], row.get('style', ''))
+    children = build_grid_children(row, [], style, 1280, content_width_px=900)
+    # Stacked stat blocks may flatten into per-line children, but each stat's
+    # numeric token (font-size 48px) marks the column start. The three numeric
+    # tokens must pack tightly, NOT evenly span ~9".
+    num_tokens = [c for c in children if c.get('text', '').strip() in ('21', '0', '3')]
+    assert len(num_tokens) == 3, num_tokens
+    xs = sorted(round(c['bounds']['x'], 3) for c in num_tokens)
+    # Compact span: three numeric anchors fall within ~3" — was ~8.4" pre-fix.
+    assert xs[2] - xs[0] < 3.0, xs
+    # Each numeric token shrink-wraps its glyph width (≤ 0.6") — NOT a 3" slice.
+    num_widths = [round(c['bounds']['width'], 3) for c in num_tokens]
+    for w in num_widths:
+        assert w < 0.7, num_widths
+    print("  PASS: compact flex-row packs stat blocks at intrinsic width")
+
+
+def test_compact_flex_row_falls_back_to_even_split_when_oversized():
+    """When intrinsic widths overflow the container, fall back to even split.
+
+    Stacked-block stats normally hit the compact-packing path (flex_slots),
+    but if the container is far too narrow to fit the intrinsic measurements,
+    we keep the legacy even-split so nothing collapses to zero.
+    """
+    html = '''
+    <div style="display:flex; gap:16px;">
+      <div>
+        <div style="font-size:120px; line-height:1;">VERYWIDE</div>
+        <div style="font-size:14px;">label one</div>
+      </div>
+      <div>
+        <div style="font-size:120px; line-height:1;">ALSOWIDE</div>
+        <div style="font-size:14px;">label two</div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    row = soup.find('div')
+    style = compute_element_style(row, [], row.get('style', ''))
+    # Container too narrow to fit two giant numeric stacks side-by-side
+    children = build_grid_children(row, [], style, 1280, content_width_px=200)
+    assert children, children
+    # Group children by stat-block (numeric token at large font marks anchor)
+    big_tokens = [c for c in children if 'WIDE' in (c.get('text', '') or '')]
+    assert len(big_tokens) == 2, big_tokens
+    widths = [round(c['bounds']['width'], 3) for c in big_tokens]
+    # Fallback even-split → both anchors get the same slot width
+    assert abs(widths[0] - widths[1]) < 0.05, widths
+    print("  PASS: compact flex-row falls back to even split when oversized")
+
+
+def test_stretch_column_block_text_to_inner_width_expands_narrow_heading():
+    """Block-level headings inside a column panel must claim the full inner
+    panel width so authored `<br>` line breaks don't get re-wrapped into
+    orphaned half-rows."""
+    container = {
+        'type': 'container',
+        'tag': 'div',
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': 4.0, 'height': 2.0},
+        'children': [
+            {
+                'type': 'text',
+                'tag': 'h2',
+                'text': '演示文稿制作\n本不该这么难',
+                'bounds': {'x': 0.0, 'y': 0.0, 'width': 2.08, 'height': 1.5},
+                'styles': {'fontSize': '36px'},
+            },
+            {
+                'type': 'text',
+                'tag': 'span',  # inline, must NOT be stretched
+                'text': 'inline label',
+                'bounds': {'x': 0.0, 'y': 1.6, 'width': 1.2, 'height': 0.18},
+                'styles': {'fontSize': '14px'},
+            },
+        ],
+    }
+    _stretch_column_block_text_to_inner_width(container, 3.90)
+    h2 = container['children'][0]
+    span = container['children'][1]
+    assert abs(h2['bounds']['width'] - 3.90) < 0.001, h2['bounds']
+    assert abs(span['bounds']['width'] - 1.2) < 0.001, span['bounds']
+
+    # Already-wide heading must not shrink
+    container2 = {
+        'type': 'container',
+        'tag': 'div',
+        'children': [
+            {
+                'type': 'text',
+                'tag': 'h2',
+                'text': 'wide title',
+                'bounds': {'x': 0.0, 'y': 0.0, 'width': 5.0, 'height': 0.6},
+                'styles': {'fontSize': '36px'},
+            },
+        ],
+    }
+    _stretch_column_block_text_to_inner_width(container2, 3.90)
+    assert abs(container2['children'][0]['bounds']['width'] - 5.0) < 0.001
+    print("  PASS: column block text stretches to inner panel width")
+
+
 def test_layout_slide_elements_respects_slide_justify_center():
     """Slide roots authored with justify-content:center should vertically center the content block."""
     elements = [
@@ -2973,7 +3096,11 @@ def test_measure_flow_box_inline_flex_card_prefers_intrinsic_width():
     flow_box = measure_flow_box(card, [], None, 1440, content_width_px=800, local_origin=True)
     assert flow_box is not None
     assert flow_box['bounds']['width'] < (800 / PX_PER_IN) - 1.0, flow_box['bounds']
-    assert flow_box['bounds']['width'] > 2.5, flow_box['bounds']
+    # Compact flex-row packing (gap + no distributing justify-content) packs
+    # each child at its intrinsic content width, so the card shrinks tighter
+    # than the older even-split behavior. Floor at 2.3" guards against a
+    # degenerate padding-only result.
+    assert flow_box['bounds']['width'] > 2.3, flow_box['bounds']
     print("  PASS: inline-flex flow_box cards prefer intrinsic width")
 
 
@@ -5989,6 +6116,9 @@ def run_tests():
     test_slide_anchored_text_preserves_bottom_right_position()
     test_parse_html_to_slides_clones_body_fixed_brand_mark_for_each_slide()
     test_centered_flex_wrap_preserves_intrinsic_metric_stack_widths()
+    test_compact_flex_row_packs_stat_blocks_at_intrinsic_width()
+    test_compact_flex_row_falls_back_to_even_split_when_oversized()
+    test_stretch_column_block_text_to_inner_width_expands_narrow_heading()
     test_layout_slide_elements_respects_slide_justify_center()
     test_layout_slide_elements_respects_slide_justify_flex_end()
     test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()
