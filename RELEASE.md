@@ -1,5 +1,43 @@
 # Release Notes
 
+## v1.6.6 - 2026-04-30
+
+This patch lands a dedicated `disc_layout` builder for the `Swiss Modern` Slide 3 ("discovery / geometric diagram"). The fallback path was spreading the three numbered steps horizontally across the slide and pushing the SVG diagram off-screen entirely; the new builder stacks the steps as a left-aligned vertical list and anchors the SVG inside the right-hand column.
+
+本次补丁为 `Swiss Modern` 的 Slide 3（"discovery / 几何图示"）增加专用 `disc_layout` builder。fallback 路径之前把三个编号步骤横向铺到屏外（最后一个在 x=13.55"），并把 SVG 图示推到 x=17-22"（完全不在画布内）。新 builder 把步骤改为左对齐的纵向列表，并把 SVG 钉在右栏内部。
+
+### Highlights
+
+- New `disc_layout` layout role + `_build_swiss_disc_layout` / `_build_swiss_disc_steps` builders for `.disc-header + .disc-body` slides. The header (eyebrow / h2 / rule) packs at the authored top padding, and the body splits into a left `.disc-steps` column and a right `.disc-diagram` column.
+- `_build_swiss_disc_steps` lays out each `.disc-step` as a baseline-anchored row: number column at its `min-width`, content column (title + paragraph) takes the rest. The three steps now stack vertically instead of being spread across the row.
+- `.diagram-svg` is rendered through the existing `build_svg_container`, returning a relative container whose rect/line/text descendants stay inside the SVG bounds. Decorative-SVG classification is unchanged, so `Aurora Mesh` (which relies on the existing decorative filter) is not affected.
+- One new regression test covers the disc_steps stacking + left-number column.
+
+### Geometry deltas (Swiss Modern Slide 3)
+
+| Element | Before | After |
+| --- | --- | --- |
+| `.disc-step` `01` x | `0.50"` | `0.667"` (with header) |
+| `.disc-step` `02` x | `6.27"` (drifted right) | `0.667"` (vertically stacked) |
+| `.disc-step` `03` x | `13.55"` (off-slide) | `0.667"` (vertically stacked) |
+| `.diagram-svg` rect/line/text x | `17-22"` (fully off-slide) | `9.7-12.5"` (in right column) |
+
+### Visual snapshot
+
+- `Swiss Modern` canonical: Slide 03 stays at `9.3/10` (the structure is dramatically more correct, but per-page SSIM is already near the cross-renderer cap so the score doesn't move); overall stays at `9.07/10`
+- `Aurora Mesh` regression unchanged at `9.00/10`
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
 ## v1.6.5 - 2026-04-30
 
 This patch lands two new dedicated `Swiss Modern` builders to close the structural mismatches on Slide 4 (`.sol-inner` index list) and Slide 7 (`.inst-inner` install blocks). Slide 4's `.sol-list` now stretches every row to the full content width with a fixed left-aligned number column, and Slide 7's `.terminal-line` inline-block spans render as proper dark pills (paired background shape + text overlay) instead of being folded into the parent text.

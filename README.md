@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.5`
+Current release: `v1.6.6`
 
 ## 中文说明
 
@@ -133,6 +133,16 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.6 更新重点（patch）
+
+- 新增 `disc_layout` layout role：覆盖 `.disc-header + .disc-body` 类幻灯片（Swiss Slide 3）。`_build_swiss_disc_layout` 负责顶部标题区 + 下方双列布局（左 `.disc-steps` 编号列表 + 右 `.disc-diagram` SVG 图示）
+- 新增 `_build_swiss_disc_steps` helper：每个 `.disc-step` 在左数字列（min-width）+ 右内容列（剩余宽度），垂直堆叠而不是横向溢出
+- SVG `.diagram-svg` 现在通过 `build_svg_container` 渲染为相对容器，rect/line/text 元素全部约束在 SVG 边界内（修前在 x=17-22"，完全屏外）
+- 修前 P3 三个数字 01/02/03 横向漂移到 x=0.5/6.27/13.55；修后全部对齐 x=0.667 垂直堆叠
+- 新增回归测试：`test_swiss_disc_steps_stack_vertically_with_left_number_column`
+- `Swiss Modern` canonical：Slide 03 保持 `9.3/10`（结构大改但 SSIM 已在跨渲染器 cap，视觉分不动）；整体保持 `9.07/10`
+- `Aurora Mesh` 视觉回归保持 `9.00/10`（SVG 装饰判定未改，未影响 Aurora）
 
 ### v1.6.5 更新重点（patch）
 
@@ -313,6 +323,16 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.6 Highlights (patch)
+
+- New `disc_layout` layout role for `.disc-header + .disc-body` slides (Swiss Slide 3). `_build_swiss_disc_layout` handles the top title block plus a bottom two-column row: left `.disc-steps` numbered list + right `.disc-diagram` SVG illustration
+- New `_build_swiss_disc_steps` helper: each `.disc-step` stacks vertically with the number column at its `min-width` and the content column taking the rest, instead of spreading the three steps horizontally across the slide
+- The `.diagram-svg` SVG now renders through `build_svg_container` as a relative container, so its rect/line/text descendants stay anchored inside the SVG bounds (was rendering at `x=17-22"`, fully off-slide)
+- Before: 01/02/03 numbers drifted horizontally to `x=0.5 / 6.27 / 13.55"`. After: all aligned at `x=0.667"` stacked vertically
+- New regression test: `test_swiss_disc_steps_stack_vertically_with_left_number_column`
+- `Swiss Modern` canonical: Slide 03 stays at `9.3/10` (structure dramatically improved but SSIM is at the cross-renderer cap); overall stays at `9.07/10`
+- `Aurora Mesh` visual compare unchanged at `9.00/10` (SVG decorative classifier untouched)
 
 ### v1.6.5 Highlights (patch)
 

@@ -398,6 +398,15 @@
           ".inst-inner"
         ]
       }
+    },
+    "disc_layout": {
+      "canonical": {
+        "direct_children_all": [
+          ".disc-header",
+          ".disc-body",
+          ".slide-num-label"
+        ]
+      }
     }
   },
   "style_constraints": {

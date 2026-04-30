@@ -4447,6 +4447,205 @@ def _build_swiss_inst_blocks(
     return [root]
 
 
+def _build_swiss_disc_steps(
+    steps_node: Tag,
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    column_w_in: float,
+    contract: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], float]:
+    """Layout `.disc-steps`: vertically stacked numbered rows.
+
+    Each `.disc-step` has [.disc-step-num span, content div] in a flex-row;
+    the number column takes its `min-width`, content column takes the rest.
+    Returns (elements, total_height) anchored relative to the column origin.
+    """
+    steps_style = compute_element_style(steps_node, css_rules, steps_node.get('style', ''))
+    list_gap_in = max(_get_gap_px(steps_style) / PX_PER_IN, 0.12)
+
+    elements: List[Dict[str, Any]] = []
+    cur_y = 0.0
+
+    for step in _direct_tag_children(steps_node):
+        if 'disc-step' not in _element_classes(step):
+            continue
+        step_style = compute_element_style(step, css_rules, step.get('style', ''), steps_style)
+        gap_in = max(_get_gap_px(step_style) / PX_PER_IN, 0.12)
+
+        kids = _direct_tag_children(step)
+        num_node = next((c for c in kids if 'disc-step-num' in _element_classes(c)), None)
+        content_node = next((c for c in kids if c is not num_node), None)
+        if num_node is None or content_node is None:
+            continue
+
+        num_style = compute_element_style(num_node, css_rules, num_node.get('style', ''), step_style)
+        content_style = compute_element_style(content_node, css_rules, content_node.get('style', ''), step_style)
+
+        min_w_raw = num_style.get('minWidth', num_style.get('min-width', '')) or ''
+        num_col_w_in = 0.0
+        if min_w_raw:
+            num_col_w_in = _resolve_css_length_with_basis(min_w_raw, column_w_in * PX_PER_IN) / PX_PER_IN
+        if num_col_w_in <= 0:
+            num_col_w_in = 0.4
+
+        num_el = build_text_element(num_node, num_style, css_rules, slide_width_px, num_col_w_in * PX_PER_IN)
+        content_x = num_col_w_in + gap_in
+        content_w_in = max(column_w_in - content_x, 0.5)
+
+        # The content side stacks (title block + desc paragraph). Pack
+        # whatever direct children it has so multi-line bodies still flow.
+        content_built = _pack_direct_child_content(
+            content_node, css_rules, step_style, slide_width_px, content_w_in * PX_PER_IN, contract,
+        )
+        if num_el is None or content_built is None:
+            continue
+
+        num_el['bounds']['x'] = 0.0
+        num_el['bounds']['y'] = cur_y
+        num_el['bounds']['width'] = num_col_w_in
+        elements.append(num_el)
+
+        # Place packed content container at content_x, cur_y
+        content_built['bounds']['x'] = content_x
+        content_built['bounds']['y'] = cur_y
+        content_built['bounds']['width'] = content_w_in
+        elements.append(content_built)
+
+        row_h = max(num_el['bounds'].get('height', 0.0), content_built['bounds'].get('height', 0.0))
+        cur_y += row_h + list_gap_in
+
+    if cur_y > 0:
+        cur_y -= list_gap_in
+    return elements, cur_y
+
+
+def _build_swiss_disc_layout(
+    slide_root: Tag,
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    slide_height_px: float,
+    contract: Optional[Dict[str, Any]],
+    layout_info: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """Builder for the `.disc-header + .disc-body` (geometric diagram) slide.
+
+    Top: eyebrow / h2 / rule packed at the disc-header padding.
+    Bottom: two-column row — left `.disc-steps` (vertical list), right
+            `.disc-diagram` (SVG illustration).
+    """
+    header_node = _direct_child_matches_selector(slide_root, '.disc-header')
+    body_node = _direct_child_matches_selector(slide_root, '.disc-body')
+    if header_node is None or body_node is None:
+        return None
+
+    slide_style = compute_element_style(slide_root, css_rules, slide_root.get('style', ''))
+    slide_w_in = slide_width_px / PX_PER_IN
+    slide_h_in = slide_height_px / PX_PER_IN
+    slide_pad_l, slide_pad_r, slide_pad_t, slide_pad_b = _resolve_box_padding_in(
+        slide_style, slide_width_px, slide_height_px,
+    )
+
+    # --- Header ---
+    header_style = compute_element_style(header_node, css_rules, header_node.get('style', ''), slide_style)
+    raw_header_pad = header_style.get('padding', '') or _lookup_matching_css_property(header_node, css_rules, 'padding')
+    head_pad_l, head_pad_r, head_pad_t, head_pad_b = _resolve_box_padding_in(
+        header_style, slide_width_px, slide_height_px, raw_value=raw_header_pad,
+    )
+    raw_header_margin = header_style.get('margin', '') or _lookup_matching_css_property(header_node, css_rules, 'margin')
+    _, _, _, head_mb = _resolve_box_margin_in(
+        header_style, slide_width_px, slide_height_px, raw_value=raw_header_margin,
+    )
+    header_x_in = max(slide_pad_l, head_pad_l)
+    header_w_in = max(slide_w_in - header_x_in - max(slide_pad_r, head_pad_r), 1.0)
+    header_packed = _pack_direct_child_content(
+        header_node, css_rules, slide_style, slide_width_px, header_w_in * PX_PER_IN, contract,
+    )
+    if header_packed is None:
+        return None
+    header_y_in = max(slide_pad_t, head_pad_t)
+    header_packed['bounds']['x'] = header_x_in
+    header_packed['bounds']['y'] = header_y_in
+
+    # --- Body ---
+    body_style = compute_element_style(body_node, css_rules, body_node.get('style', ''), slide_style)
+    raw_body_pad = body_style.get('padding', '') or _lookup_matching_css_property(body_node, css_rules, 'padding')
+    body_pad_l, body_pad_r, body_pad_t, body_pad_b = _resolve_box_padding_in(
+        body_style, slide_width_px, slide_height_px, raw_value=raw_body_pad,
+    )
+    body_gap_in = max(_get_gap_px(body_style) / PX_PER_IN, 0.2)
+    body_x_in = max(slide_pad_l, body_pad_l)
+    body_w_in = max(slide_w_in - body_x_in - max(slide_pad_r, body_pad_r), 1.0)
+
+    steps_node = _direct_child_matches_selector(body_node, '.disc-steps')
+    diagram_node = _direct_child_matches_selector(body_node, '.disc-diagram')
+    if steps_node is None or diagram_node is None:
+        return None
+
+    # Diagram: prefer SVG container measurement; fall back to fixed-aspect square.
+    diagram_style = compute_element_style(diagram_node, css_rules, diagram_node.get('style', ''), body_style)
+    svg = next((c for c in _direct_tag_children(diagram_node) if c.name and c.name.lower() == 'svg'), None)
+    diagram_w_in = 0.0
+    diagram_h_in = 0.0
+    diagram_built: Optional[Dict[str, Any]] = None
+    if svg is not None:
+        target_diag_w_in = min(body_w_in * 0.40, 3.5)
+        diagram_built = build_svg_container(
+            svg, css_rules, diagram_style, slide_width_px,
+            content_width_px=target_diag_w_in * PX_PER_IN,
+        )
+        if diagram_built:
+            diagram_w_in = diagram_built['bounds'].get('width', target_diag_w_in)
+            diagram_h_in = diagram_built['bounds'].get('height', target_diag_w_in)
+    if diagram_built is None:
+        diagram_w_in = min(body_w_in * 0.40, 3.0)
+        diagram_h_in = diagram_w_in
+
+    steps_w_in = max(body_w_in - diagram_w_in - body_gap_in, 1.0)
+    steps_elements, steps_h = _build_swiss_disc_steps(
+        steps_node, css_rules, slide_width_px, steps_w_in, contract,
+    )
+
+    # Body height: tallest of the two columns
+    body_content_h_in = max(steps_h, diagram_h_in)
+    available_below_header = max(slide_h_in - slide_pad_b - (header_y_in + header_packed['bounds'].get('height', 0.0) + head_mb + body_pad_t), 0.0)
+    body_y_in = (
+        header_y_in
+        + header_packed['bounds'].get('height', 0.0)
+        + head_mb
+        + body_pad_t
+        + max((available_below_header - body_content_h_in) / 2.0, 0.0)
+    )
+
+    # Vertical-center each column relative to body content height (mimics align-items:center)
+    steps_v_offset = max((body_content_h_in - steps_h) / 2.0, 0.0)
+    diagram_v_offset = max((body_content_h_in - diagram_h_in) / 2.0, 0.0)
+
+    # Anchor steps and diagram into absolute slide coords
+    for el in steps_elements:
+        el['bounds']['x'] = body_x_in + el['bounds'].get('x', 0.0)
+        el['bounds']['y'] = body_y_in + steps_v_offset + el['bounds'].get('y', 0.0)
+
+    if diagram_built:
+        diagram_built['bounds']['x'] = body_x_in + steps_w_in + body_gap_in
+        diagram_built['bounds']['y'] = body_y_in + diagram_v_offset
+
+    root = {
+        'type': 'container',
+        'tag': slide_root.name,
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': slide_w_in, 'height': slide_h_in},
+        'styles': slide_style,
+        'children': [header_packed],
+        '_children_relative': True,
+        'layoutDone': True,
+        '_component_contract': 'swiss_disc_layout',
+    }
+    root['children'].extend(steps_elements)
+    if diagram_built:
+        root['children'].append(diagram_built)
+
+    return [root]
+
+
 def _build_swiss_role_elements(
     slide_root: Tag,
     css_rules: List[CSSRule],
@@ -4505,6 +4704,15 @@ def _build_swiss_role_elements(
         )
     if role == 'inst_blocks':
         return _build_swiss_inst_blocks(
+            slide_root,
+            css_rules,
+            slide_width_px,
+            slide_height_px,
+            contract,
+            layout_info,
+        )
+    if role == 'disc_layout':
+        return _build_swiss_disc_layout(
             slide_root,
             css_rules,
             slide_width_px,

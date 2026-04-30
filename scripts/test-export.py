@@ -58,6 +58,7 @@ measure_flow_box = export_sandbox.measure_flow_box
 _stretch_column_block_text_to_inner_width = export_sandbox._stretch_column_block_text_to_inner_width
 _build_swiss_index_list_rows = export_sandbox._build_swiss_index_list_rows
 _build_swiss_terminal_line = export_sandbox._build_swiss_terminal_line
+_build_swiss_disc_steps = export_sandbox._build_swiss_disc_steps
 flow_gap_in = getattr(export_sandbox, '_flow_gap_in', None)
 remeasure_text_for_final_width = getattr(export_sandbox, '_remeasure_text_for_final_width', None)
 try:
@@ -2996,6 +2997,44 @@ def test_swiss_terminal_line_renders_dark_pill_with_paired_overlay():
     assert abs(shape['bounds']['y'] - 0.5) < 0.001, shape
     assert text['bounds']['y'] > shape['bounds']['y'], (shape, text)
     print("  PASS: swiss terminal-line renders dark pill with paired overlay")
+
+
+def test_swiss_disc_steps_stack_vertically_with_left_number_column():
+    """`.disc-steps` must stack each `.disc-step` vertically, NOT spread them
+    horizontally. Each step's number column sits at x=0 with the content
+    column starting after `min-width + gap`."""
+    html = '''
+    <div class="disc-steps" style="display:flex; flex-direction:column; gap:16px;">
+      <div class="disc-step" style="display:flex; gap:12px; align-items:flex-start;">
+        <div class="disc-step-num" style="font-size:32px; font-weight:900; line-height:1; min-width:36px; color:#c41e3a;">01</div>
+        <div>
+          <div class="disc-step-title" style="font-size:18px; font-weight:900;">Describe theme</div>
+          <p class="disc-step-desc" style="font-size:14px;">Enter content and audience.</p>
+        </div>
+      </div>
+      <div class="disc-step" style="display:flex; gap:12px; align-items:flex-start;">
+        <div class="disc-step-num" style="font-size:32px; font-weight:900; line-height:1; min-width:36px; color:#c41e3a;">02</div>
+        <div>
+          <div class="disc-step-title" style="font-size:18px; font-weight:900;">Generate previews</div>
+          <p class="disc-step-desc" style="font-size:14px;">Three different style options.</p>
+        </div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    steps_node = soup.find('div', class_='disc-steps')
+    elements, total_h = _build_swiss_disc_steps(steps_node, [], 1280, column_w_in=4.5, contract=None)
+    assert elements, elements
+    nums = [e for e in elements if e.get('text', '').strip() in ('01', '02')]
+    assert len(nums) == 2, nums
+    # All numbers pinned to x=0 (left column)
+    for n in nums:
+        assert abs(n['bounds']['x']) < 0.01, n['bounds']
+    # Numbers stack vertically, not horizontally
+    assert nums[1]['bounds']['y'] > nums[0]['bounds']['y'] + 0.4, [n['bounds'] for n in nums]
+    # Total height non-degenerate
+    assert total_h > 0.6, total_h
+    print("  PASS: swiss disc_steps stack vertically with left number column")
 
 
 def test_layout_slide_elements_respects_slide_justify_center():
@@ -6191,6 +6230,7 @@ def run_tests():
     test_stretch_column_block_text_to_inner_width_expands_narrow_heading()
     test_swiss_index_list_rows_stretch_full_width_with_left_number_column()
     test_swiss_terminal_line_renders_dark_pill_with_paired_overlay()
+    test_swiss_disc_steps_stack_vertically_with_left_number_column()
     test_layout_slide_elements_respects_slide_justify_center()
     test_layout_slide_elements_respects_slide_justify_flex_end()
     test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()

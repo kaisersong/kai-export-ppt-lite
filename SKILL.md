@@ -1,7 +1,7 @@
 ---
 name: kai-export-ppt-lite
 description: Use when exporting HTML presentations to editable PPTX in sandbox environments where Playwright cannot be installed. Pure Python: bs4 + python-pptx + Pillow. Keywords: export pptx sandbox, html to pptx no browser, editable powerpoint from html.
-version: 1.6.5
+version: 1.6.6
 metadata:
   openclaw:
     emoji: "📄"
