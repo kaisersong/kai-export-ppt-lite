@@ -285,7 +285,8 @@
           ".slide-num-label"
         ],
         "direct_children_any": [
-          ".hero-inner"
+          ".hero-inner",
+          ".cta-inner"
         ]
       },
       "compatible": {

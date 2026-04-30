@@ -3843,7 +3843,7 @@ def _build_swiss_title_grid(
     # centering + content packing was empirically worse for them.
     hero_node, _matched_inner_selector = _direct_child_matches_any_selector(
         slide_root,
-        ['.hero-inner', '.flow-inner', '.feat-inner'],
+        ['.hero-inner', '.flow-inner', '.feat-inner', '.cta-inner'],
     )
     hero_style = slide_style
     content_node = slide_root
@@ -3913,6 +3913,16 @@ def _build_swiss_title_grid(
     }
     packed['bounds']['x'] = content_x_in
     packed['bounds']['y'] = content_y_in
+    # Lock the entire packed subtree so the downstream layout pass cannot
+    # re-center compact-width container children (e.g. `.cta-echo` packed at
+    # ~2.5" was being centered horizontally on the slide).
+    def _freeze_layout(node: Dict[str, Any]) -> None:
+        if not isinstance(node, dict):
+            return
+        node.setdefault('layoutDone', True)
+        for child in node.get('children', []) or []:
+            _freeze_layout(child)
+    _freeze_layout(packed)
     root['children'].append(packed)
     return [root]
 
@@ -4066,14 +4076,17 @@ def _build_swiss_index_list_rows(
 
         row_h = max(num_h, baseline_offset + content_h) + pad_t + pad_b
 
-        # Border-bottom decoration line spanning the full inner width
+        # Border-bottom hairline spanning the full inner width. PPTX renders
+        # any solid-fill rectangle at minimum 1 device pixel, so a 1px CSS
+        # hairline reads visually thicker than the source. Use a minimum
+        # ~0.5px equivalent so the divider stays light/airy like the source.
         border_bottom = (item_style.get('borderBottom', '') or '').strip()
         if border_bottom and 'none' not in border_bottom and not border_bottom.startswith('0'):
             border_w_px = parse_px(border_bottom.split()[0]) if border_bottom else 0.0
             if border_w_px > 0:
                 m = re.search(r'(rgb[a]?\([^)]+\)|#[0-9a-fA-F]+)', border_bottom)
                 line_color = m.group(0) if m else '#e5e5e5'
-                line_h_in = max(border_w_px / PX_PER_IN, 1.0 / PX_PER_IN)
+                line_h_in = max(border_w_px * 0.5 / PX_PER_IN, 0.5 / PX_PER_IN)
                 rows.append({
                     'type': 'shape',
                     'tag': 'div',
@@ -6635,14 +6648,18 @@ def _pack_relative_block_container(
         })
 
     current_y = 0.0
-    min_x = min(item['min_x'] for item in packed_items)
     max_right = 0.0
     center_children = style.get('textAlign', '') == 'center'
 
     for item_idx, item in enumerate(packed_items):
+        # Normalize each item's leftmost child to x=0 relative to the packed
+        # container. Previously we used a single global min_x, but inner
+        # children produced by different code paths (e.g. flex-row containers
+        # vs. inline spans) may report inconsistent local origins, leaving
+        # one item at x=0.5 and another at x=0.0 within the same packed flow.
         for child in item['children']:
             cb = child.get('bounds', {})
-            cb['x'] = cb.get('x', 0.0) - min_x
+            cb['x'] = cb.get('x', 0.0) - item['min_x']
             cb['y'] = current_y + (cb.get('y', 0.0) - item['min_y'])
             max_right = max(max_right, cb.get('x', 0.0) + cb.get('width', 0.0))
         if item_idx < len(packed_items) - 1:
@@ -6990,7 +7007,9 @@ def _measure_compact_flex_child_width_in(
         font_px = parse_px(desc_style.get('fontSize', '16px')) or 16.0
         cjk = sum(1 for c in text if ord(c) > 127)
         latin = len(text) - cjk
-        approx = (cjk * font_px * 0.96 + latin * font_px * 0.55) / PX_PER_IN
+        # Use slightly looser multipliers so a borderline single-line measurement
+        # (e.g. "21" at 48px) doesn't trip the wrap engine into 2 lines downstream.
+        approx = (cjk * font_px * 1.0 + latin * font_px * 0.62) / PX_PER_IN
         if approx > widest:
             widest = approx
     if widest <= 0 and natural > 0:
@@ -7002,6 +7021,9 @@ def _measure_compact_flex_child_width_in(
         parse_px(child_style.get('paddingLeft', '0px')) +
         parse_px(child_style.get('paddingRight', '0px'))
     ) / PX_PER_IN
+    # Add a small safety margin to keep single-line text from wrapping at the
+    # measured boundary in PPTX's text engine.
+    widest += 0.05
     return min(widest, cap_in)
 
 
@@ -12618,6 +12640,27 @@ def export_table_element(slide, elem):
                 Inches(cw), Inches(ch)
             )
             bg_rgb = parse_color(cs.get('backgroundColor', ''))
+            if not bg_rgb:
+                # When a cell wraps a single inline-block span with its own
+                # background (e.g. `<td><span class="terminal-line">cmd</span></td>`),
+                # promote that span's bg to the cell so the white-on-dark text
+                # stays legible. Without this, the run color (#fff) renders
+                # invisibly on a transparent cell.
+                seg_with_bg = next(
+                    (
+                        seg for seg in cell.get('segments', [])
+                        if (seg.get('bgColor') or '').strip()
+                        and (seg.get('text') or '').strip()
+                    ),
+                    None,
+                )
+                if seg_with_bg is None:
+                    for frag in cell.get('fragments', []) or []:
+                        if (frag.get('bgColor') or '').strip() and (frag.get('text') or '').strip():
+                            seg_with_bg = frag
+                            break
+                if seg_with_bg is not None:
+                    bg_rgb = parse_color(seg_with_bg.get('bgColor', ''))
             if bg_rgb:
                 cell_shape.fill.solid()
                 cell_shape.fill.fore_color.rgb = RGBColor(*bg_rgb)

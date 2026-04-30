@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.7`
+Current release: `v1.6.8`
 
 ## 中文说明
 
@@ -133,6 +133,17 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.8 更新重点（patch / 用户反馈修复）
+
+四条用户反馈的视觉缺陷修复：
+
+- **K1 KPI 数字下方文字没对齐**：`_measure_compact_flex_child_width_in()` 给单行测量加 +0.05" 安全余量并调高字宽系数（latin 0.55→0.62, cjk 0.96→1.0），避免 "21" 这类边界数字被 PPTX wrap 引擎误判 2 行。修后 P1 三列 label 都在同一 y=8.183
+- **K2 P4 分割线太粗**：`.index-item border-bottom` 从 1px 改为 ~0.5px 等效高度（`max(border_w * 0.5, 0.5px)`），更接近源 hairline 视觉
+- **K3 P5 白字后面应有黑背景**：`export_table_element` 现在会把 cell 内单 inline-block bg span 的背景色提升为整 cell 背景，避免白字 on 白格不可见。`<td><span class="terminal-line">cmd</span></td>` 现在渲染为黑底白字
+- **K4 P8 KPI 应靠左对齐**：扩 swiss `title_grid` canonical 接受 `.cta-inner`（之前只接 `.hero-inner` → 落到 fallback 被居中）；`_pack_relative_block_container` 改为 per-item 而非 global min_x normalize，避免 flex-row 容器（x=0）和 inline span（x=0.5）被错位定位
+- 跨 deck 副作用：`_pack_relative_block_container` 改动让 data-story 测试 wrapper width 阈值 `≥6.9 → ≥6.4"`（更接近源 max-width 700px = 6.48"）
+- `Swiss Modern` canonical：`9.07 → 9.04`（P5 黑底匹配度问题导致 SSIM 微降，但视觉缺陷修复优先）；`Aurora Mesh` `9.00 → 9.01`
 
 ### v1.6.7 更新重点（patch / 同步）
 
@@ -329,6 +340,17 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.8 Highlights (patch / user-reported fixes)
+
+Four user-reported visual defects fixed:
+
+- **K1 KPI label vertical mismatch**: `_measure_compact_flex_child_width_in()` now adds a `+0.05"` safety margin and uses looser glyph multipliers (latin `0.55→0.62`, cjk `0.96→1.0`) so a borderline two-character numeric like "21" no longer trips the PPTX wrap engine into 2 lines. P1 labels now share `y=8.183`.
+- **K2 P4 divider too thick**: `.index-item border-bottom` shapes use `~0.5px` equivalent height (`max(border_w * 0.5, 0.5px)`) so the divider reads closer to the source CSS hairline.
+- **K3 P5 white text on white cell**: `export_table_element` now promotes a single inline-block bg span's background up to the cell, so `<td><span class="terminal-line">cmd</span></td>` renders as a dark cell with legible white text.
+- **K4 P8 KPI centered instead of left-aligned**: extended swiss `title_grid` canonical to accept `.cta-inner` (was falling to fallback path that center-fitted compact-width containers); switched `_pack_relative_block_container` to per-item x-normalization so flex-row containers (`x=0`) and inline spans (`x=0.5`) within the same packed flow no longer end up at mismatched origins.
+- Cross-deck side effect: data-story `centered wrapper` test threshold relaxed `>=6.9 → >=6.4"` (matches source `max-width: 700px ≈ 6.48"`).
+- `Swiss Modern` canonical: `9.07 → 9.04` (per-cell black bg match drives a small SSIM dip but visibility fix takes priority); `Aurora Mesh` `9.00 → 9.01`.
 
 ### v1.6.7 Highlights (patch / contract sync)
 

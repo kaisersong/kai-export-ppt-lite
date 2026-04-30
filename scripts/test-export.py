@@ -2316,7 +2316,11 @@ def test_data_story_centered_column_wrapper_preserves_max_width_and_children():
         None,
     )
     assert wrapper is not None, slide7['elements']
-    assert wrapper['bounds']['width'] >= 6.9, wrapper['bounds']
+    # Authored CSS: `max-width: min(90vw, 700px)` → 700/108 ≈ 6.48". Per-item
+    # x-normalization in `_pack_relative_block_container` now respects this
+    # max-width without padding-driven inflation, so the floor is 6.4" (was
+    # 6.9" before the inconsistent global-min-x shift was removed).
+    assert wrapper['bounds']['width'] >= 6.4, wrapper['bounds']
     child_containers = _collect_elements_by_type(wrapper.get('children', []), 'container')
     split_rails = [child for child in child_containers if child.get('_component_contract') == 'split_rail']
     metric_grids = [
