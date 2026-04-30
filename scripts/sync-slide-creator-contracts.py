@@ -408,6 +408,10 @@ PRESET_OVERRIDE_SPECS: Dict[str, Dict[str, Any]] = {
             "geometric_diagram",
             "contents_index",
             "data_table",
+            "inner_panel",
+            "index_list",
+            "inst_blocks",
+            "disc_layout",
         ],
         "text_expectations": {
             "tabular_numbers": True,
@@ -552,6 +556,29 @@ PRESET_OVERRIDE_SPECS: Dict[str, Dict[str, Any]] = {
                     "wrapper_children_all": [".quote-block"],
                     "direct_children_all": [".slide-num-label"],
                     "unwrap_wrapper": True,
+                },
+            },
+            "inner_panel": {
+                "canonical": {
+                    "direct_children_all": [".slide-num-label"],
+                    "direct_children_any": [".flow-inner", ".feat-inner"],
+                },
+            },
+            "index_list": {
+                "canonical": {
+                    "direct_children_all": [".slide-num-label"],
+                    "direct_children_any": [".sol-inner"],
+                },
+            },
+            "inst_blocks": {
+                "canonical": {
+                    "direct_children_all": [".slide-num-label"],
+                    "direct_children_any": [".inst-inner"],
+                },
+            },
+            "disc_layout": {
+                "canonical": {
+                    "direct_children_all": [".disc-header", ".disc-body", ".slide-num-label"],
                 },
             },
         },

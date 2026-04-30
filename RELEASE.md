@@ -1,5 +1,28 @@
 # Release Notes
 
+## v1.6.7 - 2026-04-30
+
+This patch is a contract-sync catch-up. v1.6.4 / v1.6.5 / v1.6.6 added four new `swiss-modern` layout roles (`inner_panel`, `index_list`, `inst_blocks`, `disc_layout`) directly to the vendored contract under `contracts/slide_creator/presets/swiss-modern.json`, but the upstream-sync script in `scripts/sync-slide-creator-contracts.py` was unaware of them. Without this patch, the next sync would silently revert the vendored contract to the old four-role schema and break the Swiss Modern Slide 3 / 4 / 5 / 6 / 7 builders.
+
+本次补丁是契约同步补齐。v1.6.4/1.6.5/1.6.6 直接给 vendored 契约 `contracts/slide_creator/presets/swiss-modern.json` 加了 4 个新 layout role（`inner_panel / index_list / inst_blocks / disc_layout`），但 `scripts/sync-slide-creator-contracts.py` 的同步脚本不认识它们。如果不打这个 patch，下次同步会把 vendored 契约静默回退到旧四角色 schema，Swiss Modern 的 Slide 3/4/5/6/7 builder 会被破坏。
+
+### Highlights
+
+- `scripts/sync-slide-creator-contracts.py` `swiss-modern.layout_variations` and `swiss-modern.layout_contracts` extended to include `inner_panel`, `index_list`, `inst_blocks`, `disc_layout`.
+- No runtime code changes; vendored contract and exporter logic untouched.
+- Swiss Modern canonical visual compare remains at `9.07/10`; Aurora Mesh unchanged at `9.00/10`.
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/sync-slide-creator-contracts.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
 ## v1.6.6 - 2026-04-30
 
 This patch lands a dedicated `disc_layout` builder for the `Swiss Modern` Slide 3 ("discovery / geometric diagram"). The fallback path was spreading the three numbered steps horizontally across the slide and pushing the SVG diagram off-screen entirely; the new builder stacks the steps as a left-aligned vertical list and anchors the SVG inside the right-hand column.

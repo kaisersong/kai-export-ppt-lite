@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.6`
+Current release: `v1.6.7`
 
 ## 中文说明
 
@@ -133,6 +133,12 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.7 更新重点（patch / 同步）
+
+- `scripts/sync-slide-creator-contracts.py` 中扩 swiss-modern 的 `layout_variations` 与 `layout_contracts`，包含本次 session 新增的 `inner_panel / index_list / inst_blocks / disc_layout` 四个 role。下次执行 sync 时这些 role 不再被覆盖
+- 不动代码逻辑，纯协议落地
+- `Swiss Modern` canonical 保持 `9.07/10`；`Aurora Mesh` 保持 `9.00/10`
 
 ### v1.6.6 更新重点（patch）
 
@@ -323,6 +329,12 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.7 Highlights (patch / contract sync)
+
+- Extended `scripts/sync-slide-creator-contracts.py` with the four new `swiss-modern` layout roles introduced this session: `inner_panel / index_list / inst_blocks / disc_layout`. The next contract sync will preserve these vendored roles instead of overwriting them.
+- No runtime code changes; protocol-level catch-up only.
+- `Swiss Modern` canonical stays at `9.07/10`; `Aurora Mesh` unchanged at `9.00/10`.
 
 ### v1.6.6 Highlights (patch)
 
