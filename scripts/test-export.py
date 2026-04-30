@@ -56,6 +56,8 @@ extract_css_from_soup = export_sandbox.extract_css_from_soup
 map_font = export_sandbox.map_font
 measure_flow_box = export_sandbox.measure_flow_box
 _stretch_column_block_text_to_inner_width = export_sandbox._stretch_column_block_text_to_inner_width
+_build_swiss_index_list_rows = export_sandbox._build_swiss_index_list_rows
+_build_swiss_terminal_line = export_sandbox._build_swiss_terminal_line
 flow_gap_in = getattr(export_sandbox, '_flow_gap_in', None)
 remeasure_text_for_final_width = getattr(export_sandbox, '_remeasure_text_for_final_width', None)
 try:
@@ -2926,6 +2928,74 @@ def test_stretch_column_block_text_to_inner_width_expands_narrow_heading():
     _stretch_column_block_text_to_inner_width(container2, 3.90)
     assert abs(container2['children'][0]['bounds']['width'] - 5.0) < 0.001
     print("  PASS: column block text stretches to inner panel width")
+
+
+def test_swiss_index_list_rows_stretch_full_width_with_left_number_column():
+    """`.sol-list` rows should pin the index number to the left and stretch
+    the content column across the rest of the row, baseline-anchored."""
+    html = '''
+    <div class="sol-list" style="display:flex; flex-direction:column; gap:2px;">
+      <div class="index-item" style="display:flex; align-items:baseline; gap:16px; padding:8px 0; border-bottom:1px solid #e5e5e5;">
+        <span class="index-num" style="font-family:Archivo Black; font-size:48px; font-weight:900; line-height:1; min-width:72px; color:#c41e3a;">01</span>
+        <div><span style="font-size:24px; font-weight:900;">Bold Signal</span><br><span style="font-size:14px;">High-contrast accent</span></div>
+      </div>
+      <div class="index-item" style="display:flex; align-items:baseline; gap:16px; padding:8px 0; border-bottom:1px solid #e5e5e5;">
+        <span class="index-num" style="font-family:Archivo Black; font-size:48px; font-weight:900; line-height:1; min-width:72px; color:#c41e3a;">02</span>
+        <div><span style="font-size:24px; font-weight:900;">Aurora Mesh</span><br><span style="font-size:14px;">Gradient backdrop</span></div>
+      </div>
+    </div>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    list_node = soup.find('div', class_='sol-list')
+    inner_w_in = 11.83
+    rows = _build_swiss_index_list_rows(list_node, [], 1280, inner_w_in, contract=None)
+    nums = [r for r in rows if r.get('text', '').strip() in ('01', '02')]
+    contents = [r for r in rows if 'Bold Signal' in (r.get('text', '') or '') or 'Aurora Mesh' in (r.get('text', '') or '')]
+    assert len(nums) == 2, nums
+    assert len(contents) == 2, contents
+    # Numbers pinned left at x=0 (relative to inner container)
+    for n in nums:
+        assert n['bounds']['x'] < 0.05, n['bounds']
+    # Content column starts after number + gap and stretches across the rest
+    for c in contents:
+        assert c['bounds']['x'] > 0.6, c['bounds']  # past number column
+        assert c['bounds']['width'] > 8.0, c['bounds']  # stretched, not 1.7"
+    # Content baseline-aligned: dropped below number top by ≈ font-size delta
+    n0_y = nums[0]['bounds']['y']
+    c0_y = contents[0]['bounds']['y']
+    assert c0_y > n0_y, (n0_y, c0_y)
+    assert (c0_y - n0_y) < 0.5, (n0_y, c0_y)
+    # Two rows stack vertically with gap between them
+    assert nums[1]['bounds']['y'] > nums[0]['bounds']['y'] + 0.4, [nums[0]['bounds'], nums[1]['bounds']]
+    print("  PASS: swiss index_list rows stretch full width with left number column")
+
+
+def test_swiss_terminal_line_renders_dark_pill_with_paired_overlay():
+    """`.terminal-line` (inline-block + bg) must render as a paired bg shape +
+    text overlay, NOT collapse into the parent's text content."""
+    html = '''
+    <span class="terminal-line"
+      style="font-family:monospace; font-size:14px; background:#0A0A0A; color:#fff; padding:10px 16px; display:inline-block;">
+      clawhub install kai-slide-creator
+    </span>
+    '''
+    soup = BeautifulSoup(html, 'html.parser')
+    span = soup.find('span', class_='terminal-line')
+    elements = _build_swiss_terminal_line(span, [], None, 1280, max_w_in=7.0, rel_y_in=0.5)
+    assert len(elements) == 2, elements
+    shape, text = elements[0], elements[1]
+    assert shape.get('type') == 'shape', shape
+    assert text.get('type') == 'text', text
+    # Paired so render keeps them aligned
+    assert shape.get('_pair_with') == text.get('_pair_with'), (shape.get('_pair_with'), text.get('_pair_with'))
+    # Pill is taller than the bare text (padding included)
+    assert shape['bounds']['height'] > text['bounds']['height'] + 0.05, (shape['bounds'], text['bounds'])
+    # Pill width includes left+right padding around the text
+    assert shape['bounds']['width'] > text['bounds']['width'] + 0.1, (shape['bounds'], text['bounds'])
+    # Both anchored at rel_y_in=0.5 (text inset by pad_t)
+    assert abs(shape['bounds']['y'] - 0.5) < 0.001, shape
+    assert text['bounds']['y'] > shape['bounds']['y'], (shape, text)
+    print("  PASS: swiss terminal-line renders dark pill with paired overlay")
 
 
 def test_layout_slide_elements_respects_slide_justify_center():
@@ -6119,6 +6189,8 @@ def run_tests():
     test_compact_flex_row_packs_stat_blocks_at_intrinsic_width()
     test_compact_flex_row_falls_back_to_even_split_when_oversized()
     test_stretch_column_block_text_to_inner_width_expands_narrow_heading()
+    test_swiss_index_list_rows_stretch_full_width_with_left_number_column()
+    test_swiss_terminal_line_renders_dark_pill_with_paired_overlay()
     test_layout_slide_elements_respects_slide_justify_center()
     test_layout_slide_elements_respects_slide_justify_flex_end()
     test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()

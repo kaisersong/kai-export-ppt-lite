@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.4`
+Current release: `v1.6.5`
 
 ## 中文说明
 
@@ -133,6 +133,15 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.5 更新重点（patch）
+
+- 新增 `index_list` layout role：覆盖 `.sol-inner` 类幻灯片（Swiss Slide 4），处理"中央堆叠的 eyebrow + h2 + sol-rule + sol-list"结构。`_build_swiss_index_list_rows` 让每个 `.index-item` 占满全宽，数字列固定宽度（`min-width`），内容列拿剩余宽度，并按字号差近似 baseline 对齐
+- 新增 `inst_blocks` layout role：覆盖 `.inst-inner` 类幻灯片（Swiss Slide 7）。`_build_swiss_inst_block_card` 处理 left-border 装饰条 + label + `.terminal-line` 黑底胶囊（paired bg shape + 文字 overlay），不再把 inline-block span bg 折成纯文字
+- 新增 `_build_swiss_terminal_line` helper：把 `display:inline-block + background` 的 inline span 升级成 paired bg shape + text，padding 完整保留
+- 新增三个回归测试：`test_swiss_index_list_rows_stretch_full_width_with_left_number_column`、`test_swiss_terminal_line_renders_dark_pill_with_paired_overlay`
+- `Swiss Modern` canonical：Slide 04 `8.9 → 9.2`（+0.3）；Slide 07 `9.1 → 8.9`（-0.2，结构对了但 SSIM 跨渲染器对齐略差）；整体 `9.06 → 9.07`
+- `Aurora Mesh` 视觉回归保持 `9.00/10`
 
 ### v1.6.4 更新重点（patch）
 
@@ -304,6 +313,15 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.5 Highlights (patch)
+
+- New `index_list` layout role for `.sol-inner` slides (Swiss Slide 4). `_build_swiss_index_list_rows` makes every `.index-item` claim the full row: a fixed-width number column from `min-width` plus a content column that consumes the rest, baseline-anchored by font-size delta
+- New `inst_blocks` layout role for `.inst-inner` slides (Swiss Slide 7). `_build_swiss_inst_block_card` renders the left border accent + label + `.terminal-line` dark pill (paired bg shape + text overlay) instead of folding the inline-block span into the parent text
+- New `_build_swiss_terminal_line` helper: promotes `display:inline-block + background` spans into paired bg shape + text overlay, preserving the authored pill padding
+- Two new regression tests for the new builders
+- `Swiss Modern` canonical: Slide 04 `8.9 → 9.2` (+0.3); Slide 07 `9.1 → 8.9` (-0.2, structure matches source but cross-renderer SSIM dips); overall `9.06 → 9.07`
+- `Aurora Mesh` visual compare unchanged at `9.00/10`
 
 ### v1.6.4 Highlights (patch)
 

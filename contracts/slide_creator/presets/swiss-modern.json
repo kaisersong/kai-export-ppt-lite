@@ -378,6 +378,26 @@
           ".feat-inner"
         ]
       }
+    },
+    "index_list": {
+      "canonical": {
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "direct_children_any": [
+          ".sol-inner"
+        ]
+      }
+    },
+    "inst_blocks": {
+      "canonical": {
+        "direct_children_all": [
+          ".slide-num-label"
+        ],
+        "direct_children_any": [
+          ".inst-inner"
+        ]
+      }
     }
   },
   "style_constraints": {

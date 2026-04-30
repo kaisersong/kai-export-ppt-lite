@@ -3989,6 +3989,464 @@ def _build_swiss_pull_quote(
     return [root]
 
 
+def _build_swiss_index_list_rows(
+    list_node: Tag,
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    inner_w_in: float,
+    contract: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Lay out `.sol-list` as full-width rows with [number left | content right]."""
+    list_style = compute_element_style(list_node, css_rules, list_node.get('style', ''))
+    list_gap_in = max(_get_gap_px(list_style) / PX_PER_IN, 2.0 / PX_PER_IN)
+
+    rows: List[Dict[str, Any]] = []
+    current_y = 0.0
+
+    for item in _direct_tag_children(list_node):
+        if 'index-item' not in _element_classes(item):
+            continue
+        item_style = compute_element_style(item, css_rules, item.get('style', ''), list_style)
+
+        raw_pad = item_style.get('padding', '') or _lookup_matching_css_property(item, css_rules, 'padding')
+        pad_l, pad_r, pad_t, pad_b = _resolve_box_padding_in(
+            item_style, inner_w_in * PX_PER_IN, 600.0, raw_value=raw_pad,
+        )
+
+        item_kids = _direct_tag_children(item)
+        num_node = next((c for c in item_kids if 'index-num' in _element_classes(c)), None)
+        content_node = next((c for c in item_kids if c is not num_node), None)
+        if num_node is None or content_node is None:
+            continue
+
+        num_style = compute_element_style(num_node, css_rules, num_node.get('style', ''), item_style)
+        gap_in = max(_get_gap_px(item_style) / PX_PER_IN, 0.10)
+
+        # Number column: respect min-width
+        min_w_raw = num_style.get('minWidth', num_style.get('min-width', '')) or ''
+        num_col_w_in = 0.0
+        if min_w_raw:
+            num_col_w_in = _resolve_css_length_with_basis(min_w_raw, inner_w_in * PX_PER_IN) / PX_PER_IN
+        if num_col_w_in <= 0:
+            num_col_w_in = 0.75
+
+        num_el = build_text_element(num_node, num_style, css_rules, slide_width_px, num_col_w_in * PX_PER_IN)
+
+        # Content column gets the rest of the row
+        content_x = pad_l + num_col_w_in + gap_in
+        content_w_in = max(inner_w_in - content_x - pad_r, 0.5)
+        content_style = compute_element_style(content_node, css_rules, content_node.get('style', ''), item_style)
+        content_el = build_text_element(content_node, content_style, css_rules, slide_width_px, content_w_in * PX_PER_IN)
+
+        if num_el is None or content_el is None:
+            continue
+
+        num_h = num_el['bounds'].get('height', 0.0)
+        content_h = content_el['bounds'].get('height', 0.0)
+        # Baseline-align: drop the smaller element so its baseline matches the larger.
+        # For simplicity, top-align both at y=pad_t but anchor by the bigger of the two.
+        # The visual effect of CSS `align-items: baseline` is approximated by pinning
+        # the content's first line to sit on the number's baseline.
+        num_font_px = parse_px(num_style.get('fontSize', '48px')) or 48.0
+        content_font_px = parse_px(content_style.get('fontSize', '24px')) or 24.0
+        num_baseline = num_h * 0.82  # approx baseline within line box
+        content_baseline = content_font_px / PX_PER_IN * 0.82
+        baseline_offset = max(num_baseline - content_baseline, 0.0)
+
+        num_el['bounds']['x'] = pad_l
+        num_el['bounds']['y'] = current_y + pad_t
+        num_el['bounds']['width'] = num_col_w_in
+
+        content_el['bounds']['x'] = content_x
+        content_el['bounds']['y'] = current_y + pad_t + baseline_offset
+        content_el['bounds']['width'] = content_w_in
+
+        rows.append(num_el)
+        rows.append(content_el)
+
+        row_h = max(num_h, baseline_offset + content_h) + pad_t + pad_b
+
+        # Border-bottom decoration line spanning the full inner width
+        border_bottom = (item_style.get('borderBottom', '') or '').strip()
+        if border_bottom and 'none' not in border_bottom and not border_bottom.startswith('0'):
+            border_w_px = parse_px(border_bottom.split()[0]) if border_bottom else 0.0
+            if border_w_px > 0:
+                m = re.search(r'(rgb[a]?\([^)]+\)|#[0-9a-fA-F]+)', border_bottom)
+                line_color = m.group(0) if m else '#e5e5e5'
+                line_h_in = max(border_w_px / PX_PER_IN, 1.0 / PX_PER_IN)
+                rows.append({
+                    'type': 'shape',
+                    'tag': 'div',
+                    'bounds': {
+                        'x': 0.0,
+                        'y': current_y + row_h - line_h_in,
+                        'width': inner_w_in,
+                        'height': line_h_in,
+                    },
+                    'styles': {
+                        'backgroundColor': line_color,
+                        'borderRadius': '',
+                    },
+                    '_is_decoration': True,
+                    'layoutDone': True,
+                })
+
+        current_y += row_h + list_gap_in
+
+    return rows
+
+
+def _build_swiss_index_list(
+    slide_root: Tag,
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    slide_height_px: float,
+    contract: Optional[Dict[str, Any]],
+    layout_info: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """Builder for `.sol-inner` slides: vertically-centered eyebrow / h2 / rule
+    plus a full-width `.sol-list` of indexed rows."""
+    inner_node, _ = _direct_child_matches_any_selector(slide_root, ['.sol-inner'])
+    if inner_node is None:
+        return None
+
+    slide_style = compute_element_style(slide_root, css_rules, slide_root.get('style', ''))
+    slide_w_in = slide_width_px / PX_PER_IN
+    slide_h_in = slide_height_px / PX_PER_IN
+    slide_pad_l, slide_pad_r, slide_pad_t, slide_pad_b = _resolve_box_padding_in(
+        slide_style, slide_width_px, slide_height_px,
+    )
+    content_h_in = max(slide_h_in - slide_pad_t - slide_pad_b, 0.8)
+
+    inner_style = compute_element_style(inner_node, css_rules, inner_node.get('style', ''), slide_style)
+    raw_padding = inner_style.get('padding', '') or _lookup_matching_css_property(inner_node, css_rules, 'padding')
+    inner_pad_l, inner_pad_r, inner_pad_t, inner_pad_b = _resolve_box_padding_in(
+        inner_style, slide_width_px, slide_height_px, raw_value=raw_padding,
+    )
+
+    content_x_in = max(slide_pad_l, inner_pad_l)
+    content_w_in = max(slide_w_in - content_x_in - max(slide_pad_r, inner_pad_r), 1.0)
+    inner_w_px = content_w_in * PX_PER_IN
+
+    inner_gap_in = max(_get_gap_px(inner_style) / PX_PER_IN, 0.0)
+
+    packed_children: List[Dict[str, Any]] = []
+    current_y = 0.0
+    for child in _direct_tag_children(inner_node):
+        child_style = compute_element_style(child, css_rules, child.get('style', ''), inner_style)
+        if child_style.get('position', '').strip() in ('absolute', 'fixed'):
+            continue
+        child_classes = _element_classes(child)
+
+        if 'sol-list' in child_classes:
+            rows = _build_swiss_index_list_rows(child, css_rules, slide_width_px, content_w_in, contract)
+            for el in rows:
+                el['bounds']['y'] += current_y
+                packed_children.append(el)
+            if rows:
+                last_bottom = max(e['bounds']['y'] + e['bounds']['height'] for e in rows)
+                current_y = last_bottom
+                if inner_gap_in > 0:
+                    current_y += inner_gap_in
+            continue
+
+        built = flat_extract(
+            child, css_rules, inner_style, slide_width_px,
+            content_width_px=inner_w_px, local_origin=True, contract=contract,
+        )
+        if not built and child.name.lower() == 'hr':
+            rule_shape = _build_rule_shape_from_node(child, child_style, slide_width_px, inner_w_px)
+            if rule_shape:
+                built = [rule_shape]
+        for el in built:
+            el['bounds']['y'] = current_y + el['bounds'].get('y', 0.0)
+            packed_children.append(el)
+        if built:
+            last_bottom = max(e['bounds']['y'] + e['bounds']['height'] for e in built)
+            current_y = last_bottom
+            if inner_gap_in > 0:
+                current_y += inner_gap_in
+
+    total_h_in = max(current_y - inner_gap_in, 0.0) if packed_children else 0.0
+
+    justify = (inner_style.get('justifyContent') or inner_style.get('justify-content') or '').strip()
+    if justify == 'center':
+        content_y_in = slide_pad_t + max((content_h_in - total_h_in) / 2.0, 0.0)
+    elif justify == 'flex-end':
+        content_y_in = max(slide_h_in - slide_pad_b - total_h_in, slide_pad_t)
+    else:
+        content_y_in = slide_pad_t + (inner_pad_t if inner_pad_t > 0 else 0.0)
+
+    inner_container = {
+        'type': 'container',
+        'tag': inner_node.name,
+        'bounds': {'x': content_x_in, 'y': content_y_in, 'width': content_w_in, 'height': total_h_in},
+        'styles': inner_style,
+        'children': packed_children,
+        '_children_relative': True,
+        'layoutDone': True,
+    }
+
+    root = {
+        'type': 'container',
+        'tag': slide_root.name,
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': slide_w_in, 'height': slide_h_in},
+        'styles': slide_style,
+        'children': [inner_container],
+        '_children_relative': True,
+        'layoutDone': True,
+        '_component_contract': 'swiss_index_list',
+    }
+    return [root]
+
+
+def _build_swiss_terminal_line(
+    span_node: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Dict[str, str],
+    slide_width_px: float,
+    max_w_in: float,
+    rel_y_in: float,
+) -> List[Dict[str, Any]]:
+    """Render a `.terminal-line` inline-block span as a dark pill (bg shape +
+    overlaid text). Returns [shape, text] anchored at x=0, y=rel_y_in."""
+    span_style = compute_element_style(span_node, css_rules, span_node.get('style', ''), parent_style)
+    _expand_padding(span_style)
+    pad_l = parse_px(span_style.get('paddingLeft', '0px')) / PX_PER_IN
+    pad_r = parse_px(span_style.get('paddingRight', '0px')) / PX_PER_IN
+    pad_t = parse_px(span_style.get('paddingTop', '0px')) / PX_PER_IN
+    pad_b = parse_px(span_style.get('paddingBottom', '0px')) / PX_PER_IN
+
+    text_el = build_text_element(span_node, span_style, css_rules, slide_width_px, max_w_in * PX_PER_IN)
+    if text_el is None:
+        return []
+
+    text_w = text_el['bounds'].get('width', 0.0)
+    text_h = text_el['bounds'].get('height', 0.0)
+    pill_w = min(text_w + pad_l + pad_r, max_w_in)
+    pill_h = text_h + pad_t + pad_b
+
+    shape = build_shape_element(span_node, span_style, slide_width_px)
+    shape['bounds'] = {'x': 0.0, 'y': rel_y_in, 'width': pill_w, 'height': pill_h}
+    import uuid
+    pair_id = str(uuid.uuid4())[:8]
+    shape['_pair_with'] = pair_id
+    shape['_css_pad_l'] = pad_l
+    shape['_css_pad_r'] = pad_r
+    shape['_css_pad_t'] = pad_t
+    shape['_css_pad_b'] = pad_b
+
+    text_el['_pair_with'] = pair_id
+    text_el['bounds'] = {
+        'x': pad_l,
+        'y': rel_y_in + pad_t,
+        'width': pill_w - pad_l - pad_r,
+        'height': text_h,
+    }
+    return [shape, text_el]
+
+
+def _build_swiss_inst_block_card(
+    block_node: Tag,
+    css_rules: List[CSSRule],
+    parent_style: Dict[str, str],
+    slide_width_px: float,
+    block_w_in: float,
+    rel_y_in: float,
+) -> Tuple[List[Dict[str, Any]], float]:
+    """Build a single `.inst-block`: left border bar + label + terminal-line pill.
+
+    Returns (elements, total_height)."""
+    block_style = compute_element_style(block_node, css_rules, block_node.get('style', ''), parent_style)
+    _expand_padding(block_style)
+    pad_l = parse_px(block_style.get('paddingLeft', '0px')) / PX_PER_IN
+    pad_r = parse_px(block_style.get('paddingRight', '0px')) / PX_PER_IN
+    pad_t = parse_px(block_style.get('paddingTop', '0px')) / PX_PER_IN
+    pad_b = parse_px(block_style.get('paddingBottom', '0px')) / PX_PER_IN
+    border_l_in = _extract_border_width_in(block_style, 'borderLeft')
+    block_gap_in = parse_px(block_style.get('gap', '8px')) / PX_PER_IN if block_style.get('gap') else 8.0 / PX_PER_IN
+
+    elements: List[Dict[str, Any]] = []
+    inner_x = pad_l + border_l_in
+    inner_w_in = max(block_w_in - inner_x - pad_r, 0.5)
+    cur_y = pad_t
+
+    # Border-left bar (red for highlight, dark otherwise)
+    border_left_raw = (block_style.get('borderLeft', '') or '').strip()
+    if border_l_in > 0 and border_left_raw and 'none' not in border_left_raw:
+        m = re.search(r'(rgb[a]?\([^)]+\)|#[0-9a-fA-F]+|var\([^)]+\))', border_left_raw)
+        bar_color = m.group(0) if m else '#1a1a1a'
+        if bar_color.startswith('var('):
+            # Resolve common swiss vars
+            if 'red' in bar_color.lower():
+                bar_color = '#c41e3a'
+            else:
+                bar_color = '#1a1a1a'
+        elements.append({
+            'type': 'shape',
+            'tag': 'div',
+            'bounds': {'x': 0.0, 'y': rel_y_in, 'width': border_l_in, 'height': 0.0},  # height filled later
+            'styles': {'backgroundColor': bar_color, 'borderRadius': ''},
+            '_is_decoration': True,
+            '_swiss_inst_border_bar': True,
+            'layoutDone': True,
+        })
+
+    for child in _direct_tag_children(block_node):
+        child_classes = _element_classes(child)
+        child_style = compute_element_style(child, css_rules, child.get('style', ''), block_style)
+        if 'terminal-line' in child_classes:
+            pill_els = _build_swiss_terminal_line(
+                child, css_rules, block_style, slide_width_px, inner_w_in, rel_y_in + cur_y,
+            )
+            for el in pill_els:
+                el['bounds']['x'] += inner_x
+                elements.append(el)
+            if pill_els:
+                pill_h = max(e['bounds']['height'] for e in pill_els)
+                cur_y += pill_h + block_gap_in
+        else:
+            text_el = build_text_element(child, child_style, css_rules, slide_width_px, inner_w_in * PX_PER_IN)
+            if text_el is None:
+                continue
+            text_el['bounds']['x'] = inner_x
+            text_el['bounds']['y'] = rel_y_in + cur_y
+            text_el['bounds']['width'] = inner_w_in
+            elements.append(text_el)
+            cur_y += text_el['bounds'].get('height', 0.2) + block_gap_in
+
+    if cur_y > 0:
+        cur_y -= block_gap_in
+    total_h = cur_y + pad_b
+
+    # Backfill border bar height to match block height
+    for el in elements:
+        if el.get('_swiss_inst_border_bar'):
+            el['bounds']['height'] = total_h
+            el.pop('_swiss_inst_border_bar', None)
+
+    return elements, total_h
+
+
+def _build_swiss_inst_blocks(
+    slide_root: Tag,
+    css_rules: List[CSSRule],
+    slide_width_px: float,
+    slide_height_px: float,
+    contract: Optional[Dict[str, Any]],
+    layout_info: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """Builder for `.inst-inner` slides: vertically-centered eyebrow / h2 / rule
+    plus left-aligned `.inst-blocks` capped at the authored max-width."""
+    inner_node, _ = _direct_child_matches_any_selector(slide_root, ['.inst-inner'])
+    if inner_node is None:
+        return None
+
+    slide_style = compute_element_style(slide_root, css_rules, slide_root.get('style', ''))
+    slide_w_in = slide_width_px / PX_PER_IN
+    slide_h_in = slide_height_px / PX_PER_IN
+    slide_pad_l, slide_pad_r, slide_pad_t, slide_pad_b = _resolve_box_padding_in(
+        slide_style, slide_width_px, slide_height_px,
+    )
+    content_h_in = max(slide_h_in - slide_pad_t - slide_pad_b, 0.8)
+
+    inner_style = compute_element_style(inner_node, css_rules, inner_node.get('style', ''), slide_style)
+    raw_padding = inner_style.get('padding', '') or _lookup_matching_css_property(inner_node, css_rules, 'padding')
+    inner_pad_l, inner_pad_r, inner_pad_t, inner_pad_b = _resolve_box_padding_in(
+        inner_style, slide_width_px, slide_height_px, raw_value=raw_padding,
+    )
+    content_x_in = max(slide_pad_l, inner_pad_l)
+    content_w_in = max(slide_w_in - content_x_in - max(slide_pad_r, inner_pad_r), 1.0)
+
+    inner_gap_in = max(_get_gap_px(inner_style) / PX_PER_IN, 0.0)
+
+    packed_children: List[Dict[str, Any]] = []
+    current_y = 0.0
+    for child in _direct_tag_children(inner_node):
+        child_style = compute_element_style(child, css_rules, child.get('style', ''), inner_style)
+        if child_style.get('position', '').strip() in ('absolute', 'fixed'):
+            continue
+        child_classes = _element_classes(child)
+
+        if 'inst-blocks' in child_classes:
+            blocks_style = child_style
+            blocks_max_raw = blocks_style.get('maxWidth', blocks_style.get('max-width', '')) or ''
+            blocks_w_in = content_w_in
+            if blocks_max_raw:
+                resolved = _resolve_css_length_with_basis(blocks_max_raw, content_w_in * PX_PER_IN)
+                if resolved > 0:
+                    blocks_w_in = min(content_w_in, resolved / PX_PER_IN)
+            blocks_gap_in = max(_get_gap_px(blocks_style) / PX_PER_IN, 0.16)
+
+            for block_child in _direct_tag_children(child):
+                block_classes = _element_classes(block_child)
+                if 'inst-block' in block_classes:
+                    block_els, block_h = _build_swiss_inst_block_card(
+                        block_child, css_rules, blocks_style, slide_width_px, blocks_w_in, current_y,
+                    )
+                    packed_children.extend(block_els)
+                    current_y += block_h + blocks_gap_in
+                else:
+                    block_built = flat_extract(
+                        block_child, css_rules, blocks_style, slide_width_px,
+                        content_width_px=blocks_w_in * PX_PER_IN, local_origin=True, contract=contract,
+                    )
+                    for el in block_built:
+                        el['bounds']['y'] = current_y + el['bounds'].get('y', 0.0)
+                        packed_children.append(el)
+                    if block_built:
+                        last_bottom = max(e['bounds']['y'] + e['bounds']['height'] for e in block_built)
+                        current_y = last_bottom + blocks_gap_in
+            if current_y > 0:
+                current_y -= blocks_gap_in
+            if inner_gap_in > 0:
+                current_y += inner_gap_in
+            continue
+
+        built = flat_extract(
+            child, css_rules, inner_style, slide_width_px,
+            content_width_px=content_w_in * PX_PER_IN, local_origin=True, contract=contract,
+        )
+        for el in built:
+            el['bounds']['y'] = current_y + el['bounds'].get('y', 0.0)
+            packed_children.append(el)
+        if built:
+            last_bottom = max(e['bounds']['y'] + e['bounds']['height'] for e in built)
+            current_y = last_bottom
+            if inner_gap_in > 0:
+                current_y += inner_gap_in
+
+    total_h_in = max(current_y - inner_gap_in, 0.0) if packed_children else 0.0
+
+    justify = (inner_style.get('justifyContent') or inner_style.get('justify-content') or '').strip()
+    if justify == 'center':
+        content_y_in = slide_pad_t + max((content_h_in - total_h_in) / 2.0, 0.0)
+    else:
+        content_y_in = slide_pad_t + (inner_pad_t if inner_pad_t > 0 else 0.0)
+
+    inner_container = {
+        'type': 'container',
+        'tag': inner_node.name,
+        'bounds': {'x': content_x_in, 'y': content_y_in, 'width': content_w_in, 'height': total_h_in},
+        'styles': inner_style,
+        'children': packed_children,
+        '_children_relative': True,
+        'layoutDone': True,
+    }
+
+    root = {
+        'type': 'container',
+        'tag': slide_root.name,
+        'bounds': {'x': 0.0, 'y': 0.0, 'width': slide_w_in, 'height': slide_h_in},
+        'styles': slide_style,
+        'children': [inner_container],
+        '_children_relative': True,
+        'layoutDone': True,
+        '_component_contract': 'swiss_inst_blocks',
+    }
+    return [root]
+
+
 def _build_swiss_role_elements(
     slide_root: Tag,
     css_rules: List[CSSRule],
@@ -4029,6 +4487,24 @@ def _build_swiss_role_elements(
         )
     if role == 'pull_quote':
         return _build_swiss_pull_quote(
+            slide_root,
+            css_rules,
+            slide_width_px,
+            slide_height_px,
+            contract,
+            layout_info,
+        )
+    if role == 'index_list':
+        return _build_swiss_index_list(
+            slide_root,
+            css_rules,
+            slide_width_px,
+            slide_height_px,
+            contract,
+            layout_info,
+        )
+    if role == 'inst_blocks':
+        return _build_swiss_inst_blocks(
             slide_root,
             css_rules,
             slide_width_px,

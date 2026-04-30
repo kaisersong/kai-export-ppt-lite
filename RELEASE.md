@@ -1,5 +1,43 @@
 # Release Notes
 
+## v1.6.5 - 2026-04-30
+
+This patch lands two new dedicated `Swiss Modern` builders to close the structural mismatches on Slide 4 (`.sol-inner` index list) and Slide 7 (`.inst-inner` install blocks). Slide 4's `.sol-list` now stretches every row to the full content width with a fixed left-aligned number column, and Slide 7's `.terminal-line` inline-block spans render as proper dark pills (paired background shape + text overlay) instead of being folded into the parent text.
+
+本次补丁为 `Swiss Modern` 增加两个专用 builder，修掉 Slide 4（`.sol-inner` 索引列表）和 Slide 7（`.inst-inner` 安装块）的结构性偏差：Slide 4 的 `.sol-list` 现在每行撑满内容宽度，数字列左对齐固定宽，内容列拿剩余宽度；Slide 7 的 `.terminal-line` inline-block span 渲染为真正的深色胶囊（paired 背景 shape + 文字 overlay），不再被折进父级文本。
+
+### Highlights
+
+- New `index_list` layout role + `_build_swiss_index_list` / `_build_swiss_index_list_rows` builders for `.sol-inner` slides. Each `.index-item` row stretches to inner panel width; the `.index-num` span sits at the left at its `min-width`, the content `<div>` takes the remaining width, and the two are baseline-anchored by font-size delta.
+- New `inst_blocks` layout role + `_build_swiss_inst_blocks` / `_build_swiss_inst_block_card` / `_build_swiss_terminal_line` builders for `.inst-inner` slides. Each `.inst-block` keeps its left-border accent, stacks label above the command pill, and renders `.terminal-line` as a paired dark bg shape + overlaid text instead of merging the span into the label text.
+- `_build_swiss_terminal_line` is reusable: any `display:inline-block + background` span can be upgraded into a paired pill while preserving CSS padding.
+- Two new regression tests cover both builders.
+
+### Geometry deltas (Swiss Modern)
+
+| Slide | Element | Before | After |
+| --- | --- | --- | --- |
+| 4 | `.index-num` `01` x | `5.175"` (centered) | `0.667"` (left-aligned) |
+| 4 | content column width | `1.74"` | `11.28"` (full row) |
+| 7 | `.inst-block` block 1 left edge | `3.20"` (centered) | `0.67"` (left-aligned) |
+| 7 | `.terminal-line` rendered as | concatenated text | dark pill bg + text overlay |
+
+### Visual snapshot
+
+- `Swiss Modern` canonical: Slide 04 `8.9 → 9.2` (+0.3); Slide 07 `9.1 → 8.9` (-0.2, structural fix lowers cross-renderer SSIM slightly); overall `9.06 → 9.07`
+- `Aurora Mesh` regression unchanged at `9.00/10`
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
 ## v1.6.4 - 2026-04-30
 
 This patch closes two structural mismatches between source CSS and the exporter on `Swiss Modern`: `.hero-stats` KPI rows on Slide 1 / 8 were being spread evenly across the full slide width instead of packed at the authored `gap` distance, and the Slide 2 left-panel heading was shrink-wrapping to its natural text width and then re-wrapping each authored `<br>` line into orphan half-rows.
