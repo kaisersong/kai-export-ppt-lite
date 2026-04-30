@@ -59,6 +59,8 @@ _stretch_column_block_text_to_inner_width = export_sandbox._stretch_column_block
 _build_swiss_index_list_rows = export_sandbox._build_swiss_index_list_rows
 _build_swiss_terminal_line = export_sandbox._build_swiss_terminal_line
 _build_swiss_disc_steps = export_sandbox._build_swiss_disc_steps
+_hairline_height_in = export_sandbox._hairline_height_in
+_build_css_hairline_shape = export_sandbox._build_css_hairline_shape
 flow_gap_in = getattr(export_sandbox, '_flow_gap_in', None)
 remeasure_text_for_final_width = getattr(export_sandbox, '_remeasure_text_for_final_width', None)
 try:
@@ -3039,6 +3041,50 @@ def test_swiss_disc_steps_stack_vertically_with_left_number_column():
     # Total height non-degenerate
     assert total_h > 0.6, total_h
     print("  PASS: swiss disc_steps stack vertically with left number column")
+
+
+def test_hairline_height_halves_thin_borders_and_passes_thick_through():
+    """1-2px CSS borders need a halved PPTX shape height (PPTX shapes render
+    at minimum 1 device pixel); thicker borders pass through unchanged."""
+    one_px_in = _hairline_height_in(1.0)
+    two_px_in = _hairline_height_in(2.0)
+    three_px_in = _hairline_height_in(3.0)
+    # 1px CSS → 0.5px equivalent (= 0.5 / PX_PER_IN)
+    assert abs(one_px_in - 0.5 / export_sandbox.PX_PER_IN) < 1e-6, one_px_in
+    # 2px CSS → 1px equivalent
+    assert abs(two_px_in - 1.0 / export_sandbox.PX_PER_IN) < 1e-6, two_px_in
+    # 3px+ pass through (no halving)
+    assert abs(three_px_in - 3.0 / export_sandbox.PX_PER_IN) < 1e-6, three_px_in
+    # Zero / negative returns 0
+    assert _hairline_height_in(0) == 0.0
+    assert _hairline_height_in(-1) == 0.0
+    print("  PASS: hairline height halves thin borders and passes thick through")
+
+
+def test_build_css_hairline_shape_extracts_color_and_skips_none():
+    """The generic hairline helper accepts CSS border shorthand and emits a
+    decoration shape, skipping `none` / 0 width."""
+    shape = _build_css_hairline_shape(
+        '1px solid #e5e5e5', x_in=0.5, y_in=2.0, width_in=10.0
+    )
+    assert shape is not None
+    assert shape['type'] == 'shape'
+    assert shape['_is_decoration'] is True
+    assert shape['layoutDone'] is True
+    assert shape['styles']['backgroundColor'] == '#e5e5e5'
+    assert abs(shape['bounds']['height'] - 0.5 / export_sandbox.PX_PER_IN) < 1e-6
+    assert shape['bounds']['width'] == 10.0
+    # `none` returns None
+    assert _build_css_hairline_shape('none', 0, 0, 5) is None
+    # `0` width returns None
+    assert _build_css_hairline_shape('0px solid #ccc', 0, 0, 5) is None
+    # Empty returns None
+    assert _build_css_hairline_shape('', 0, 0, 5) is None
+    # Falls back to default color when no color in border
+    s2 = _build_css_hairline_shape('1px solid', 0, 0, 5)
+    assert s2 is not None
+    assert s2['styles']['backgroundColor'] == '#e5e5e5'
+    print("  PASS: _build_css_hairline_shape extracts color and skips none")
 
 
 def test_layout_slide_elements_respects_slide_justify_center():
@@ -6235,6 +6281,8 @@ def run_tests():
     test_swiss_index_list_rows_stretch_full_width_with_left_number_column()
     test_swiss_terminal_line_renders_dark_pill_with_paired_overlay()
     test_swiss_disc_steps_stack_vertically_with_left_number_column()
+    test_hairline_height_halves_thin_borders_and_passes_thick_through()
+    test_build_css_hairline_shape_extracts_color_and_skips_none()
     test_layout_slide_elements_respects_slide_justify_center()
     test_layout_slide_elements_respects_slide_justify_flex_end()
     test_layout_slide_elements_ignores_skip_layout_overlays_when_centering()

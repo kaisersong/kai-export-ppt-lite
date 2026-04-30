@@ -1,5 +1,28 @@
 # Release Notes
 
+## v1.6.9 - 2026-04-30
+
+Refactor: promote v1.6.8's hairline-divider policy from `_build_swiss_index_list_rows()` into two general-purpose helpers so other builders / decks can reuse them whenever a CSS hairline border needs to render close to its source weight in PPTX.
+
+### Highlights
+
+- New `_hairline_height_in(border_w_px)`: PPTX renders any solid-fill rectangle at minimum 1 device pixel, so a 1px CSS hairline emitted directly reads thicker than the source. The helper halves 1-2px source borders (with a 0.5px floor) so the rendered visual approximates the antialiased browser hairline; 3px+ borders pass through unchanged.
+- New `_build_css_hairline_shape(border_value, x, y, w, fallback_color)`: accepts a CSS `border` shorthand string (e.g. `"1px solid #e5e5e5"`) and returns a `_is_decoration` / `layoutDone` shape sized via `_hairline_height_in()`. Returns `None` for `none` / empty / zero-width inputs.
+- `_build_swiss_index_list_rows()` now consumes the helper (~25 lines → ~10 lines, identical observable behavior).
+- Two new regression tests in `scripts/test-export.py` cover the height policy and the CSS-shorthand parsing.
+- `Swiss Modern` `9.04/10` and `Aurora Mesh` `9.01/10` unchanged from v1.6.8 (refactor preserves behavior).
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py scripts/test-export.py
+python3 scripts/test-export.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+python3 scripts/export-sandbox-pptx.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/aurora-mesh-zh.html demo/aurora-mesh-zh.pptx --outdir demo/aurora-mesh-zh-visual-compare
+```
+
 ## v1.6.8 - 2026-04-30
 
 User-reported visual defects across `Swiss Modern`. Four targeted fixes:

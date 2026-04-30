@@ -3204,6 +3204,68 @@ def _extract_border_width_in(style: Dict[str, str], border_key: str) -> float:
     return parse_px(border_value.split()[0]) / PX_PER_IN
 
 
+def _hairline_height_in(border_w_px: float) -> float:
+    """Return the PPTX shape height (in inches) that visually matches a CSS
+    `Npx solid` hairline border.
+
+    PPTX renders any solid-fill rectangle at minimum 1 device pixel, so a
+    1px CSS hairline emitted directly as a shape ends up reading thicker
+    than the source. For 1-2px source borders we halve the height (with a
+    0.5px floor) so the rendered visual approximates the antialiased
+    browser hairline. Wider source borders pass through unchanged.
+    """
+    if border_w_px <= 0:
+        return 0.0
+    if border_w_px <= 2.0:
+        return max(border_w_px * 0.5 / PX_PER_IN, 0.5 / PX_PER_IN)
+    return border_w_px / PX_PER_IN
+
+
+def _build_css_hairline_shape(
+    border_value: str,
+    x_in: float,
+    y_in: float,
+    width_in: float,
+    fallback_color: str = '#e5e5e5',
+) -> Optional[Dict[str, Any]]:
+    """Build a thin decoration shape from a CSS border shorthand value.
+
+    Accepts strings like ``"1px solid var(--grid-line)"`` or
+    ``"1px solid #e5e5e5"`` and returns a `_is_decoration`/`layoutDone`
+    shape sized to render close to the source antialiased hairline. Returns
+    None for empty, ``none``, or zero-width borders.
+    """
+    border_value = (border_value or '').strip()
+    if not border_value or 'none' in border_value or border_value.startswith('0'):
+        return None
+    parts = border_value.split()
+    if not parts:
+        return None
+    border_w_px = parse_px(parts[0])
+    if border_w_px <= 0:
+        return None
+    color = _extract_border_color(border_value) or fallback_color
+    line_h_in = _hairline_height_in(border_w_px)
+    if line_h_in <= 0 or width_in <= 0:
+        return None
+    return {
+        'type': 'shape',
+        'tag': 'div',
+        'bounds': {
+            'x': x_in,
+            'y': y_in,
+            'width': width_in,
+            'height': line_h_in,
+        },
+        'styles': {
+            'backgroundColor': color,
+            'borderRadius': '',
+        },
+        '_is_decoration': True,
+        'layoutDone': True,
+    }
+
+
 def _resolve_flex_basis_in(
     style: Dict[str, str],
     basis_px: float,
@@ -4076,33 +4138,17 @@ def _build_swiss_index_list_rows(
 
         row_h = max(num_h, baseline_offset + content_h) + pad_t + pad_b
 
-        # Border-bottom hairline spanning the full inner width. PPTX renders
-        # any solid-fill rectangle at minimum 1 device pixel, so a 1px CSS
-        # hairline reads visually thicker than the source. Use a minimum
-        # ~0.5px equivalent so the divider stays light/airy like the source.
-        border_bottom = (item_style.get('borderBottom', '') or '').strip()
-        if border_bottom and 'none' not in border_bottom and not border_bottom.startswith('0'):
-            border_w_px = parse_px(border_bottom.split()[0]) if border_bottom else 0.0
-            if border_w_px > 0:
-                m = re.search(r'(rgb[a]?\([^)]+\)|#[0-9a-fA-F]+)', border_bottom)
-                line_color = m.group(0) if m else '#e5e5e5'
-                line_h_in = max(border_w_px * 0.5 / PX_PER_IN, 0.5 / PX_PER_IN)
-                rows.append({
-                    'type': 'shape',
-                    'tag': 'div',
-                    'bounds': {
-                        'x': 0.0,
-                        'y': current_y + row_h - line_h_in,
-                        'width': inner_w_in,
-                        'height': line_h_in,
-                    },
-                    'styles': {
-                        'backgroundColor': line_color,
-                        'borderRadius': '',
-                    },
-                    '_is_decoration': True,
-                    'layoutDone': True,
-                })
+        # Border-bottom hairline spanning the full inner width.
+        hairline = _build_css_hairline_shape(
+            item_style.get('borderBottom', ''),
+            x_in=0.0,
+            y_in=current_y + row_h,
+            width_in=inner_w_in,
+        )
+        if hairline is not None:
+            # Anchor the line at the row's bottom edge.
+            hairline['bounds']['y'] = current_y + row_h - hairline['bounds']['height']
+            rows.append(hairline)
 
         current_y += row_h + list_gap_in
 

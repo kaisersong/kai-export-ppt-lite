@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.8`
+Current release: `v1.6.9`
 
 ## 中文说明
 
@@ -133,6 +133,16 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.9 更新重点（patch / refactor 提通用）
+
+- 把 `_build_swiss_index_list_rows()` 里的 hairline 高度策略提为通用 helper：
+  - `_hairline_height_in(border_w_px)`：1-2px 减半到 0.5px floor，3px+ 透传
+  - `_build_css_hairline_shape(border_value, x, y, w, fallback_color)`：从 CSS border 速记构建 decoration shape，自动跳过 `none`/0
+- `_build_swiss_index_list_rows` 现在使用通用 helper（行为不变，但代码 ~25 行 → ~10 行）
+- 后续任何 builder 遇到"PPTX 把 1px CSS 边框渲染过粗"都可直接复用
+- 新增两个回归测试：`test_hairline_height_halves_thin_borders_and_passes_thick_through`、`test_build_css_hairline_shape_extracts_color_and_skips_none`
+- `Swiss Modern` `9.04`、`Aurora Mesh` `9.01` 与 v1.6.8 持平（refactor 无行为变化）
 
 ### v1.6.8 更新重点（patch / 用户反馈修复）
 
@@ -340,6 +350,16 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.9 Highlights (patch / refactor for reuse)
+
+- Promoted the hairline-height policy from `_build_swiss_index_list_rows()` into two general-purpose helpers:
+  - `_hairline_height_in(border_w_px)`: halves 1-2px CSS borders (with a 0.5px floor) and passes 3px+ through unchanged
+  - `_build_css_hairline_shape(border_value, x, y, w, fallback_color)`: builds a decoration shape from a CSS `border` shorthand, skipping `none`/zero-width
+- Refactored `_build_swiss_index_list_rows` to use the helper (~25 lines → ~10 lines, identical behavior)
+- Any future builder facing "PPTX renders my 1px CSS border too thick" can now reuse this directly
+- Two new regression tests cover both helpers
+- `Swiss Modern` `9.04` and `Aurora Mesh` `9.01` unchanged from v1.6.8 (refactor preserves behavior)
 
 ### v1.6.8 Highlights (patch / user-reported fixes)
 
