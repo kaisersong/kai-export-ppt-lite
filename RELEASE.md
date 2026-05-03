@@ -1,6 +1,6 @@
 # Release Notes
 
-## v1.6.10 - 2026-05-03
+## v1.7.0 - 2026-05-03
 
 User-reported visual defects in `Swiss Modern` HTML-to-PPTX export. Eight targeted fixes:
 

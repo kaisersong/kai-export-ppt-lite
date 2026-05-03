@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.10`
+Current release: `v1.7.0`
 
 ## 中文说明
 
@@ -134,7 +134,7 @@ python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
 
-### v1.6.10 更新重点（patch / 用户反馈修复）
+### v1.7.0 更新重点（minor / 用户反馈修复）
 
 八条用户反馈的导出视觉缺陷修复：
 
@@ -366,6 +366,22 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.7.0 Highlights (minor / user-reported fixes)
+
+Eight user-reported visual defects in Swiss Modern HTML-to-PPTX export fixed:
+
+- **L1 li bullet**: Changed from `▶` to `•`, color now follows text color instead of hardcoded blue
+- **L2 li width**: Block-level `li` now uses full slide width instead of narrow content-based width (fixes slides 8/9 cramped text)
+- **L3 stat-divider**: 2px vertical line no longer renders as a large black block
+- **L4 pain-item border-left**: Per-item independent positioning with correct Y coordinates and heights
+- **L5 accent-border**: `.accent-border` correctly overrides `.pain-item` default gray via `borderLeftColor`
+- **L6 flex-row panels**: Slides 2/7 left/right panels now start at y=0, filling full slide height
+- **L7 table text color**: Table cell text inherits correctly from parent (black on light backgrounds)
+- **L8 rem units**: `px_to_pt()` now handles `rem` units (1rem = 16px = 12pt)
+- **M1 margin expansion**: New `_expand_margin()` expands CSS `margin: X Y` shorthand to marginTop/etc
+- **M2 marginTop gap**: Next element's marginTop now contributes to inter-element spacing
+- **M3 heading→separator gap**: h1/h2 followed by horizontal separators get 0.20" gap
 
 ### v1.6.9 Highlights (patch / refactor for reuse)
 
