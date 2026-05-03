@@ -3,7 +3,7 @@
 Pure-Python HTML-to-PPTX export for editable slide decks in sandboxed environments.  
 面向沙箱环境的纯 Python HTML 转 PPTX 导出器，目标是生成可编辑的 PowerPoint，而不是截图式 PPT。
 
-Current release: `v1.6.9`
+Current release: `v1.6.10`
 
 ## 中文说明
 
@@ -133,6 +133,22 @@ python3 scripts/test-export.py
 python3 scripts/export-sandbox-pptx.py demo/blue-sky-zh.html demo/output.pptx
 python3 scripts/rigorous-eval.py
 ```
+
+### v1.6.10 更新重点（patch / 用户反馈修复）
+
+八条用户反馈的导出视觉缺陷修复：
+
+- **L1 列表符号改圆点**：`li` bullet 从 `▶` 改为 `•`，颜色跟随文字色而非硬编码蓝色
+- **L2 列表宽度修复**：`li` 元素改用全宽而非内容宽度（修复 slides 8/9 文字过窄）
+- **L3 stat-divider 细线**：`.stat-divider` 2px 竖线不再渲染为大黑块
+- **L4 pain-item 边线定位**：每个 pain-item 的 border-left 独立定位，高度匹配各自内容
+- **L5 accent-border 红边框**：`.accent-border` 正确覆盖 `.pain-item` 默认灰色边框
+- **L6 flex-row 面板布局**：slides 2/7 左右面板从 y=0 开始填满整个幻灯片
+- **L7 表格文字颜色**：表格单元格文字正确继承父元素颜色（浅底黑字）
+- **L8 rem 单位字体**：`px_to_pt()` 支持 rem 单位（1rem = 16px = 12pt）
+- **M1 margin 展开**：新增 `_expand_margin()` 函数，展开 CSS `margin: X Y` shorthand
+- **M2 间距考虑 marginTop**：下一个元素的 marginTop 现计入元素间 gap
+- **M3 标题后分隔线间距**：h1/h2 后接 horizontal separator 时 gap 从 0.15" 增到 0.20"
 
 ### v1.6.9 更新重点（patch / refactor 提通用）
 

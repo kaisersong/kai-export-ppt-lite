@@ -1,5 +1,43 @@
 # Release Notes
 
+## v1.6.10 - 2026-05-03
+
+User-reported visual defects in `Swiss Modern` HTML-to-PPTX export. Eight targeted fixes:
+
+### Highlights
+
+- **L1**: `li` bullet changed from `▶` to `•`, color follows text color instead of hardcoded blue
+- **L2**: `li` element width now uses full slide width instead of content-based narrow width (fixes slides 8/9 cramped text)
+- **L3**: `.stat-divider` thin vertical line (2px width) no longer renders as large black block
+- **L4**: `.pain-item` border-left lines now positioned independently per-item with correct heights (not all at same y with total height)
+- **L5**: `.accent-border` red border-left color correctly overrides `.pain-item` default gray (borderLeftColor property support)
+- **L6**: Flex-row panel layouts (slides 2/7) start at y=0, filling full slide height
+- **L7**: Table cell text color inherits correctly from parent (black on light backgrounds, not white)
+- **L8**: `px_to_pt()` now handles `rem` units (1rem = 16px = 12pt)
+- **M1**: New `_expand_margin()` function expands CSS `margin: X Y` shorthand to marginTop/marginBottom/marginLeft/marginRight
+- **M2**: Margin-top of subsequent elements now contributes to inter-element gaps (e.g., `.hero-sub` margin-top:2rem adds 0.30" gap after title)
+- **M3**: Heading elements (h1/h2) preceding horizontal separator lines (swiss-rule, left-rule) get larger 0.20" gap
+
+### Validation Snapshot
+
+```bash
+python3 -m py_compile scripts/export-sandbox-pptx.py
+python3 scripts/export-sandbox-pptx.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx
+python3 scripts/compare-html-ppt-visual.py demo/swiss-canonical-zh.html demo/swiss-canonical-zh.pptx --outdir demo/swiss-canonical-zh-visual-compare
+```
+
+### Visual Fixes Summary
+
+| Issue | Before | After |
+|-------|--------|-------|
+| P2/P7 left-rule width | 4.62" (panel width) | 0.37" (CSS 40px) |
+| P2/P7 left-rule gap | 0.05" | 0.20" (margin:1rem) |
+| P3-6 swiss-rule gap | 0.15" | 0.20" (heading→separator) |
+| P8/P9 li width | 1.2-3.5" | 12.33" (full width) |
+| P10 subtitle center | x=3.85 | center=6.66 (slide center=6.67) |
+
+本次修复了用户反馈的八个导出视觉问题：列表符号、列表宽度、分隔线粗细、pain-item边线定位、红色边框、面板布局、表格文字颜色、rem单位字体。同时新增了 margin shorthand 展开、间距考虑 marginTop、标题后分隔线加间距等功能改进。
+
 ## v1.6.9 - 2026-04-30
 
 Refactor: promote v1.6.8's hairline-divider policy from `_build_swiss_index_list_rows()` into two general-purpose helpers so other builders / decks can reuse them whenever a CSS hairline border needs to render close to its source weight in PPTX.
